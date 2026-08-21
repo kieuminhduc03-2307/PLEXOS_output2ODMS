@@ -37,6 +37,7 @@ class SnapshotConfig:
     source_timezone: str | None = None
     analysis_timezone: str | None = None
     status_mode: str = "crosswalk_commitment"
+    q_limit_policy: str = "validate_only"
 
 
 @dataclass
@@ -100,6 +101,10 @@ class SnapshotResult:
                 writer.writerow({name: row[name] for name in fields})
 
     def write_operating_snapshot(self, path: str | Path) -> None:
+        q_limit_policy = {
+            "validate_only": "VALIDATE_ONLY_STATIC_CAPABILITY",
+            "apply_source": "APPLY_SOURCE_STATIC_CAPABILITY",
+        }[self.audit["generator_ac_controls"]["q_limit_policy"]]
         payload = {
             "schema": "plexos-output2odms-operating-snapshot-v3",
             "time": self.audit["selection"]["time"],
@@ -125,7 +130,7 @@ class SnapshotResult:
                     "q_min_mvar": row["source_q_min_mvar"],
                     "q_max_mvar": row["source_q_max_mvar"],
                     "base_q_reference_mvar": row["source_base_q_mvar"],
-                    "policy": "VALIDATE_AND_APPLY_STATIC_CAPABILITY",
+                    "policy": q_limit_policy,
                     "provenance": "RTS_SOURCE_DATA_GEN_CSV",
                 }
                 for row in self.rows
@@ -182,6 +187,8 @@ def build_dispatch_snapshot(
     branch_crosswalk_path: str | Path | None = None,
 ) -> SnapshotResult:
     config = config or SnapshotConfig()
+    if config.q_limit_policy not in {"validate_only", "apply_source"}:
+        raise ValueError(f"Unsupported Q-limit policy: {config.q_limit_policy}")
     if timestamp.tzinfo is not None:
         raise ValueError("Snapshot timestamp must be a timezone-naive source wall clock")
     time_context = SourceTimeContext(
@@ -521,6 +528,11 @@ def build_dispatch_snapshot(
             "set_rows": sum(row["action"] == "set" for row in status_rows),
             "preserved_rows": sum(row["action"] == "preserve" for row in status_rows),
             "policy": config.status_mode if status_rows else None,
+        },
+        "generator_ac_controls": {
+            "q_limit_policy": config.q_limit_policy,
+            "q_limit_authority": "RTS_SOURCE_DATA_GEN_CSV",
+            "runtime_mutation_authorized": config.q_limit_policy == "apply_source",
         },
         "audit_units": {
             "count": len(audit_unit_rows),

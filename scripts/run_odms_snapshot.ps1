@@ -11,7 +11,8 @@ param(
     [double]$MinVoltagePU = 0.9,
     [double]$MaxVoltagePU = 1.1,
     [double]$MaxLoadingPercent = 100.0,
-    [double]$GeneratorLimitToleranceMW = 0.0001
+    [double]$GeneratorLimitToleranceMW = 0.0001,
+    [ValidateRange(0.001,86400.0)][double]$ProcessTimeoutSeconds = 300.0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +43,15 @@ try {
     $env:Path = "$python313;$python313\DLLs;$savedPath"
     $arguments = "server=$Server model=$Model script=`"$worker`" script_params=`"$requestPath`" hide_gui"
     $process = Start-Process -FilePath $odmsExecutable -ArgumentList $arguments `
-        -WorkingDirectory $odmsDirectory -WindowStyle Hidden -PassThru -Wait
+        -WorkingDirectory $odmsDirectory -WindowStyle Hidden -PassThru
+    $timeoutMilliseconds = [Math]::Min(
+        [int64]::MaxValue,
+        [Math]::Ceiling($ProcessTimeoutSeconds * 1000.0)
+    )
+    if (-not $process.WaitForExit([int]$timeoutMilliseconds)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "ODMS process timed out after $ProcessTimeoutSeconds seconds"
+    }
     if ($process.ExitCode -ne 0) {
         throw "ODMS process failed with exit code $($process.ExitCode)"
     }

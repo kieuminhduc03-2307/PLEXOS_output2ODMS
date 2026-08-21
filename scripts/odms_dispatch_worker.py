@@ -454,8 +454,39 @@ def main():
                 q_max = float(reactive["q_max_mvar"])
                 if q_min > q_max:
                     raise ValueError("Invalid reactive capability for " + row["target_machine_name"])
-                if not unit.SetReactiveLimits(q_min, q_max):
-                    raise RuntimeError("SetReactiveLimits failed for " + row["target_machine_name"])
+                q_policy = reactive.get("policy", "VALIDATE_ONLY_STATIC_CAPABILITY")
+                q_mismatch = (
+                    abs(before["minimum_mvar"] - q_min) > ac_tolerance
+                    or abs(before["maximum_mvar"] - q_max) > ac_tolerance
+                )
+                if q_policy == "VALIDATE_ONLY_STATIC_CAPABILITY":
+                    if q_mismatch:
+                        response.update(
+                            {
+                                "stage": "input_control_data_mismatch",
+                                "adapter_valid": False,
+                                "ac_valid": False,
+                                "outcome_class": "INPUT_CONTROL_DATA_MISMATCH",
+                                "outcome_flags": ["INPUT_CONTROL_DATA_MISMATCH"],
+                            }
+                        )
+                        raise RuntimeError(
+                            "ODMS reactive capability differs from approved source for "
+                            + row["target_machine_name"]
+                        )
+                    q_limit_action = "validated_existing_capability"
+                elif q_policy == "APPLY_SOURCE_STATIC_CAPABILITY":
+                    if not unit.SetReactiveLimits(q_min, q_max):
+                        raise RuntimeError(
+                            "SetReactiveLimits failed for " + row["target_machine_name"]
+                        )
+                    q_limit_action = "applied_explicit_source_capability"
+                else:
+                    raise ValueError(
+                        "Unsupported reactive capability policy: " + str(q_policy)
+                    )
+            else:
+                q_limit_action = "not_provided"
             voltage_action = "not_provided"
             requested_kv = None
             if voltage is not None:
@@ -510,6 +541,7 @@ def main():
                     ),
                     "requested_kv": requested_kv,
                     "q_schedule_policy": "ODMS_BASE_SCHEDULE_PRESERVED_NOT_PLEXOS_Q_TIMESERIES",
+                    "q_limit_action": q_limit_action,
                 }
             )
         initialized = []

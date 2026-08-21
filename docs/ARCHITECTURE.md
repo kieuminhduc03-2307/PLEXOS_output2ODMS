@@ -51,7 +51,9 @@ approved crosswalks and does not infer identity using RTS naming rules.
 
 The RTS `gen.csv` contract is joined to the approved generator identity:
 
-- `Qmin`/`Qmax` are applied and read back for every mapped machine.
+- `Qmin`/`Qmax` are validated against the existing ODMS capability by default.
+  A mismatch fails closed as `INPUT_CONTROL_DATA_MISMATCH`; mutation requires
+  the explicit `apply_source` policy and is audited.
 - `V Setpoint p.u.` is applied only to ODMS units that already regulate voltage.
 - `MW Inj` and `MVAR Inj` calibrate the base case only. `MVAR Inj` is never
   treated as a PLEXOS Q(t) series; ODMS solves reactive output.
@@ -94,7 +96,11 @@ non-power units, out-of-range values and incomplete mappings fail closed.
 PLEXOS remains the authoritative external time-series store. ODMS Network
 Analysis receives one snapshot at a time. `run-timeseries` launches a fresh
 ODMS process and calls `BuildCase` for every timestamp, then writes an aggregate
-CSV and hash-bearing manifest. It does not populate the native
+CSV and atomic hash-bearing manifest. The batch layer has explicit fail-fast or
+continue-on-error policy, per-process timeout, bounded retry, and fingerprinted
+resume. Resume skips only completed timestamps and retries failed/interrupted
+ones; a changed electrical/source contract is rejected. AC-invalid responses
+are completed executions, not infrastructure failures. It does not populate the native
 Season/DayType/TimeOfDay schedule schema and does not infer commitment from
 `Generation == 0`.
 
@@ -105,6 +111,8 @@ native ODMS schedule.
 ## Transaction boundary
 
 - Build the case and verify every identity before the first mutation.
+- Validate static Q capability without mutation unless `apply_source` was
+  explicitly authorized.
 - Apply load, status and generation layers in deterministic order.
 - Refresh status objects with `Init()` and read back P/Q/status within tolerance.
 - Require balanced preflight and audit `MismatchDistribution=SwingBus`.
@@ -128,4 +136,7 @@ configured AC gates. Primary classes include `ADAPTER_VALID_AC_VALID`,
 `ADAPTER_VALID_AC_NONCONVERGED`, and `ADAPTER_VALID_ACCOUNTING_RESIDUAL`.
 Independent `outcome_flags` retain overlapping violations. Missing controls,
 limits, or mappings are instead classified as `INPUT_CONTROL_DATA_MISSING`,
-`LIMIT_DATA_MISSING`, or `MAPPING_INVALID`.
+`INPUT_CONTROL_DATA_MISMATCH`, `LIMIT_DATA_MISSING`, or `MAPPING_INVALID`.
+Batch-only failures use `SNAPSHOT_BUILD_FAILED`, `EXECUTION_TIMEOUT`,
+`EXECUTION_FAILED`, or response-missing/invalid classes and do not get confused
+with electrical feasibility outcomes.

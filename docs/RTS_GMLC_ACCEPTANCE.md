@@ -157,3 +157,29 @@ controls merely to obtain convergence.
 `unattributed_swing_mw` is recorded as
 `PowerFlowSummary.GenerationMW - sum(Unit.PresentMW)` at system level only. It
 is never assigned to a specific generator.
+
+## V0.4.1 production hardening smoke
+
+Q-limit authority now defaults to `validate_only`. A representative real-ODMS
+24-hour campaign (`2020-07-05 00:00` through `23:00`) validated all 3,744
+generator capability rows and made zero source Q-limit mutations.
+
+| Check | Result |
+|---|---:|
+| Independent timestamps completed | 24/24 |
+| Adapter-valid | 24/24 |
+| Infrastructure failures / timeouts | 0 / 0 |
+| AC-valid / overload / voltage-primary | 4 / 13 / 7 |
+| Q-limit validations / mutations | 3,744 / 0 |
+| Maximum ScheduledMW readback error | 1.492e-5 MW |
+| Voltage range | 0.744354–1.135259 pu |
+| Maximum branch loading | 107.769% |
+
+The unchanged AC outcome distribution confirms that removing default
+`SetReactiveLimits()` mutation did not alter this calibrated case. A subsequent
+fingerprinted `--resume` run skipped 24/24 completed snapshots without launching
+ODMS again. Automated injected-failure tests prove continue-on-error, fail-fast,
+bounded timeout/retry, retry of failed entries, skipping of completed entries,
+and rejection of a changed resume contract. A real launcher smoke with a forced
+`0.001 s` timeout produced one `EXECUTION_TIMEOUT`, finalized the manifest as
+`completed_with_failures`, continued cleanly, and left no ODMS child process.

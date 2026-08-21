@@ -123,6 +123,7 @@ python -m plexos_output2odms build-snapshot `
   --analysis-timezone UTC `
   --unit MW `
   --missing-dispatch preserve `
+  --q-limit-policy validate_only `
   --regional-load "D:\...\Load\DAY_AHEAD_regional_Load.csv" `
   --load-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\load_crosswalk.json" `
   --branch-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\branch_crosswalk.json" `
@@ -163,7 +164,10 @@ python -m plexos_output2odms run-timeseries `
   "D:\...\commissioning_24h" `
   --start 2020-07-05T00:00:00 --hours 24 --unit MW `
   --branch-crosswalk "D:\...\branch_crosswalk.json" `
-  --analysis-timezone UTC --mode analysis-only
+  --analysis-timezone UTC --mode analysis-only `
+  --q-limit-policy validate_only `
+  --failure-policy continue-on-error `
+  --snapshot-timeout-seconds 120 --max-retries 1
 ```
 
 Add `--status-mode crosswalk_commitment` to apply the reviewed commitment
@@ -173,7 +177,11 @@ the snapshot audit.
 
 Every timestamp launches a fresh `ODMS.exe` process and calls `BuildCase`, so
 state cannot leak between hours. Outputs include `timeseries_result.csv` and
-`run_manifest.json`. Modes are `analysis-only` and `sv-store`;
+atomic `run_manifest.json`. `--failure-policy` selects `fail-fast` or
+`continue-on-error`; each ODMS process has a hard timeout and optional bounded
+retries. `--resume` verifies a hash-bearing run fingerprint, skips completed
+timestamps, and retries failed/interrupted timestamps. Reusing a populated
+output directory without `--resume` is rejected. Modes are `analysis-only` and `sv-store`;
 `native-schedule` is explicitly rejected until a real ODMS schedule API is
 implemented. `StoreSolutionState()` is SV persistence, not a native schedule.
 
@@ -200,6 +208,11 @@ authoritative solved total because ODMS `Unit.PresentMW` does not expose the
 swing-compensation component in this case. The adapter reports the system-level
 difference as `unattributed_swing_mw` and never assigns it to an individual unit.
 
+Static Q limits are immutable by default: `validate_only` compares source
+Qmin/Qmax with the ODMS case and fails on drift. `Unit.SetReactiveLimits()` is
+used only when `--q-limit-policy apply_source` is explicitly selected and that
+mutation is recorded in the snapshot audit.
+
 Runtime results separate adapter validity from AC operating quality. A snapshot
 can be `adapter_valid=true` while its PF is non-converged or violates voltage,
 generator, or branch limits. `outcome_class` gives the primary result and
@@ -211,3 +224,9 @@ the local Python 3.13 runtime to `PATH` for the child process.
 
 See [RTS-GMLC acceptance](docs/RTS_GMLC_ACCEPTANCE.md) and
 [architecture](docs/ARCHITECTURE.md) for the exact result and safety boundary.
+
+This repository is an RTS-GMLC reference adapter plus a reusable ODMS execution
+core. Its RTS crosswalk builders, regional load allocation, and source-file
+parsers are benchmark-specific. A generic production integration must provide
+approved normalized identity, load, AC-control, and branch-limit contracts
+instead of applying RTS naming or allocation assumptions to another model.

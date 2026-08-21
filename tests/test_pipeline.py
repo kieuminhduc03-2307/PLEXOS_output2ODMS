@@ -88,3 +88,43 @@ def test_missing_dispatch_requires_explicit_preserve(tmp_path: Path):
     )
     assert preserved.report.ok
     assert preserved.audit["mapping"]["preserved_missing_dispatch"] == ["G2"]
+
+
+def test_reactive_limits_are_validate_only_by_default_and_apply_requires_opt_in(tmp_path: Path):
+    ac_mapping = GeneratorMapping(
+        **{
+            **mapping("G1", "machine-1").__dict__,
+            "source_base_q_mvar": 5.0,
+            "source_voltage_setpoint_pu": 1.01,
+            "source_q_min_mvar": -20.0,
+            "source_q_max_mvar": 30.0,
+            "ac_control_policy": "ODMS_REGULATING_ONLY",
+        }
+    )
+    solution, target, crosswalk = prepare(tmp_path, [ac_mapping])
+    timestamp = datetime(2020, 7, 5)
+    default_result = build_dispatch_snapshot(
+        solution, crosswalk, target, timestamp=timestamp, config=SnapshotConfig(unit="MW")
+    )
+    default_path = tmp_path / "validate-only.json"
+    default_result.write_operating_snapshot(default_path)
+    default_payload = json.loads(default_path.read_text(encoding="utf-8"))
+    assert default_payload["reactive_capabilities"][0]["policy"] == (
+        "VALIDATE_ONLY_STATIC_CAPABILITY"
+    )
+    assert not default_result.audit["generator_ac_controls"]["runtime_mutation_authorized"]
+
+    apply_result = build_dispatch_snapshot(
+        solution,
+        crosswalk,
+        target,
+        timestamp=timestamp,
+        config=SnapshotConfig(unit="MW", q_limit_policy="apply_source"),
+    )
+    apply_path = tmp_path / "apply-source.json"
+    apply_result.write_operating_snapshot(apply_path)
+    apply_payload = json.loads(apply_path.read_text(encoding="utf-8"))
+    assert apply_payload["reactive_capabilities"][0]["policy"] == (
+        "APPLY_SOURCE_STATIC_CAPABILITY"
+    )
+    assert apply_result.audit["generator_ac_controls"]["runtime_mutation_authorized"]

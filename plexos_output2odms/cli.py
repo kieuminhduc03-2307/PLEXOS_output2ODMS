@@ -91,6 +91,11 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--load-crosswalk", type=Path, default=None)
     snapshot.add_argument("--commitment", type=Path, default=None)
     snapshot.add_argument("--branch-crosswalk", type=Path, default=None)
+    snapshot.add_argument(
+        "--q-limit-policy", choices=["validate_only", "apply_source"],
+        default="validate_only",
+        help="Validate source Q limits by default; mutation requires explicit apply_source",
+    )
     snapshot.add_argument("--status-mode", choices=["crosswalk_commitment", "dispatch_on_only", "preserve_odms"], default="crosswalk_commitment")
     snapshot.add_argument("--balance-tolerance-mw", type=float, default=1e-6)
     snapshot.add_argument(
@@ -137,6 +142,24 @@ def _parser() -> argparse.ArgumentParser:
     series.add_argument("--max-voltage-pu", type=float, default=1.1)
     series.add_argument("--max-loading-percent", type=float, default=100.0)
     series.add_argument("--branch-crosswalk", type=Path, default=None)
+    series.add_argument(
+        "--q-limit-policy", choices=["validate_only", "apply_source"],
+        default="validate_only",
+        help="Validate source Q limits by default; mutation requires explicit apply_source",
+    )
+    series.add_argument(
+        "--failure-policy", choices=["fail-fast", "continue-on-error"],
+        default="continue-on-error",
+    )
+    series.add_argument(
+        "--snapshot-timeout-seconds", type=float, default=300.0,
+        help="Hard timeout for one ODMS snapshot process",
+    )
+    series.add_argument("--max-retries", type=int, default=0)
+    series.add_argument(
+        "--resume", action="store_true",
+        help="Skip completed timestamps after verifying the run contract fingerprint",
+    )
     return parser
 
 
@@ -271,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_timezone=args.source_timezone,
                     analysis_timezone=args.analysis_timezone,
                     status_mode=args.status_mode,
+                    q_limit_policy=args.q_limit_policy,
                 ),
                 dependent_on=args.dependent_on,
                 regional_load_path=args.regional_load,
@@ -325,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_timezone=args.source_timezone,
                 analysis_timezone=args.analysis_timezone,
                 status_mode=args.status_mode,
+                q_limit_policy=args.q_limit_policy,
             )
             manifest = run_timeseries(
                 args.solution,
@@ -346,17 +371,24 @@ def main(argv: list[str] | None = None) -> int:
                     min_voltage_pu=args.min_voltage_pu,
                     max_voltage_pu=args.max_voltage_pu,
                     max_loading_percent=args.max_loading_percent,
+                    failure_policy=args.failure_policy,
+                    snapshot_timeout_seconds=args.snapshot_timeout_seconds,
+                    max_retries=args.max_retries,
+                    resume=args.resume,
                 ),
             )
             print(
                 json.dumps(
                     {
                         "mode": manifest["mode"],
+                        "status": manifest["status"],
                         "requested_timestamp_count": manifest["requested_timestamp_count"],
                         "completed_timestamp_count": manifest["completed_timestamp_count"],
                         "valid_timestamp_count": manifest["valid_timestamp_count"],
                         "adapter_valid_timestamp_count": manifest["adapter_valid_timestamp_count"],
                         "outcome_counts": manifest["outcome_counts"],
+                        "infrastructure_failure_count": manifest["infrastructure_failure_count"],
+                        "resume_skip_count": manifest["resume_skip_count"],
                         "all_valid": manifest["all_valid"],
                         "run_manifest": str((args.output_directory / "run_manifest.json").resolve()),
                         "timeseries_result": str((args.output_directory / "timeseries_result.csv").resolve()),
@@ -364,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
-            return 0 if manifest["all_valid"] or args.build_only else 2
+            return 0 if manifest["batch_succeeded"] and (manifest["all_valid"] or args.build_only) else 2
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
