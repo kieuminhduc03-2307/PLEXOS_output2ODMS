@@ -214,12 +214,19 @@ def run_timeseries(
     target_cim: Path,
     output: Path,
     *,
-    regional_load: Path,
-    load_crosswalk: Path,
-    commitment: Path | None,
-    branch_crosswalk: Path | None,
     config: TimeSeriesConfig,
+    regional_load: Path | None = None,
+    load_series: Path | None = None,
+    load_crosswalk: Path | None = None,
+    commitment: Path | None = None,
+    branch_crosswalk: Path | None = None,
 ) -> dict:
+    if regional_load is not None and load_series is not None:
+        raise ValueError("Generic load series and RTS regional load are mutually exclusive")
+    if load_crosswalk is None or (regional_load is None and load_series is None):
+        raise ValueError("A load input and approved load crosswalk are required")
+    load_input = load_series or regional_load
+    load_source_mode = "generic_normalized" if load_series is not None else "rts_regional_profile"
     if config.mode == "native-schedule":
         raise ValueError("native-schedule is a future mode; StoreSolutionState is not a native schedule")
     if config.mode not in {"analysis-only", "sv-store"}:
@@ -256,7 +263,7 @@ def run_timeseries(
         effective_commitment = solution
     if effective_commitment is None:
         raise ValueError("Commitment input is required for non-native solution sources")
-    source_files = [solution, crosswalk, target_cim, regional_load, load_crosswalk]
+    source_files = [solution, crosswalk, target_cim, load_input, load_crosswalk]
     if effective_commitment not in source_files:
         source_files.append(effective_commitment)
     if branch_crosswalk is not None:
@@ -265,6 +272,9 @@ def run_timeseries(
         {"path": str(path.resolve()), "sha256": _sha256(path)} for path in source_files
     ]
     fingerprint, contract = _contract_fingerprint(source_records, config)
+    contract["load_source_mode"] = load_source_mode
+    encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
     if existing_manifest is not None and existing_manifest.get("run_fingerprint") != fingerprint:
         raise ValueError("Resume contract differs from the existing run manifest")
 
@@ -286,6 +296,15 @@ def run_timeseries(
         "run_fingerprint": fingerprint,
         "contract": contract,
         "source_files": source_records,
+        "load_source_mode": load_source_mode,
+        "load_contract": {
+            "normalized_fields": [
+                "timestamp", "source_load_id", "p_mw", "q_mvar",
+                "p_provenance", "q_provenance", "q_policy",
+            ],
+            "missing_policy": config.snapshot.missing_load_policy,
+            "provenance_policy": "preserve_per_row_in_operating_snapshot_and_audit",
+        },
         "requested_timestamp_count": len(timestamps),
         "entries": [],
     }
@@ -347,6 +366,7 @@ def run_timeseries(
                 timestamp=timestamp,
                 config=config.snapshot,
                 regional_load_path=regional_load,
+                load_series_path=load_series,
                 load_crosswalk_path=load_crosswalk,
                 commitment_path=effective_commitment,
                 branch_crosswalk_path=branch_crosswalk,

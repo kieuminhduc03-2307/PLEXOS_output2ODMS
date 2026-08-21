@@ -57,6 +57,7 @@ def allocate_rts_nodal_load(
         rows.append(
             {
                 "resource_type": "LOAD",
+                "source_load_id": item.identity,
                 "source_bus_id": item.source_bus_id,
                 "source_region": item.source_area,
                 "regional_load_mw": regional_mw[item.source_area],

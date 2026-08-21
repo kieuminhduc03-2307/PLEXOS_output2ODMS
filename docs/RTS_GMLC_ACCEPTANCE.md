@@ -183,3 +183,12 @@ bounded timeout/retry, retry of failed entries, skipping of completed entries,
 and rejection of a changed resume contract. A real launcher smoke with a forced
 `0.001 s` timeout produced one `EXECUTION_TIMEOUT`, finalized the manifest as
 `completed_with_failures`, continued cleanly, and left no ODMS child process.
+
+## V1.1 final regression
+
+The generic load boundary was added without changing the RTS profile or ODMS
+runtime. A fresh real-ODMS 24-hour run again completed 24/24 adapter-valid with
+zero infrastructure failures and the same primary outcomes: 4 AC-valid, 13
+overload, and 7 voltage violations. Q-limit mutation remained unauthorized and
+zero. Maximum initialization readback errors were 1.221e-5 MW for generators,
+1.310e-5 MW for load P, and 1.905e-6 Mvar for load Q.

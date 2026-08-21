@@ -33,6 +33,11 @@ class LoadMapping:
     source_resource_type: str = "Load"
     source_operating_class: str = "CONFORMING_LOAD"
     target_kind: str = "EnergyConsumer"
+    source_load_id: str | None = None
+
+    @property
+    def identity(self) -> str:
+        return self.source_load_id or self.source_bus_id
 
 
 def _rts_load_buses(path: str | Path) -> list[dict]:
@@ -141,7 +146,7 @@ def load_load_crosswalk(path: str | Path) -> list[LoadMapping]:
     mappings = [LoadMapping(**item) for item in payload.get("mappings", [])]
     if not mappings:
         raise ValueError("Load crosswalk contains no mappings")
-    buses = [item.source_bus_id for item in mappings]
+    buses = [item.identity for item in mappings]
     targets = [item.odms_load_mrid for item in mappings]
     if len(buses) != len(set(buses)):
         raise ValueError("Load crosswalk contains duplicate source buses")

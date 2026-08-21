@@ -42,6 +42,8 @@ The adapter never writes dispatch to `GeneratingUnit.nominalP`,
   `time,Generator A,Generator B,...`.
 - Energy Exemplar long query CSV with `child_name`, `property_name`, `_date`,
   `value` and `unit_name`.
+- Generic normalized load series with the exact contract
+  `timestamp,source_load_id,p_mw,q_mvar,p_provenance,q_provenance,q_policy`.
 
 Wide tables have no embedded unit metadata, so `--unit MW` is mandatory.
 MWh/GWh summary values are rejected as dispatch.
@@ -59,9 +61,9 @@ python -m plexos_output2odms run-timeseries `
   "D:\...\Model Solution.zip" `
   "D:\...\generator_crosswalk.json" `
   "D:\...\target_cim.xml" `
-  "D:\...\regional_load.csv" `
-  "D:\...\load_crosswalk.json" `
   "D:\...\native_solution_snapshots" `
+  --load-series "D:\...\load.normalized.csv" `
+  --load-crosswalk "D:\...\load_crosswalk.json" `
   --analysis-timezone UTC --branch-crosswalk "D:\...\branch_crosswalk.json"
 ```
 
@@ -149,7 +151,7 @@ python -m plexos_output2odms build-snapshot `
   --unit MW `
   --missing-dispatch preserve `
   --q-limit-policy validate_only `
-  --regional-load "D:\...\Load\DAY_AHEAD_regional_Load.csv" `
+  --rts-regional-load "D:\...\Load\DAY_AHEAD_regional_Load.csv" `
   --load-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\load_crosswalk.json" `
   --branch-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\branch_crosswalk.json" `
   --commitment "D:\...\allTX\PLEXOS_DA_solution_commitment.csv"
@@ -183,10 +185,10 @@ python -m plexos_output2odms run-timeseries `
   "D:\...\PLEXOS_DA_solution_generation.txt" `
   "D:\...\generator_crosswalk.json" `
   "D:\...\odms_rts_gmlc_cim17.xml" `
-  "D:\...\DAY_AHEAD_regional_Load.csv" `
-  "D:\...\load_crosswalk.json" `
-  "D:\...\PLEXOS_DA_solution_commitment_allTX.csv" `
   "D:\...\commissioning_24h" `
+  --rts-regional-load "D:\...\DAY_AHEAD_regional_Load.csv" `
+  --load-crosswalk "D:\...\load_crosswalk.json" `
+  --commitment "D:\...\PLEXOS_DA_solution_commitment_allTX.csv" `
   --start 2020-07-05T00:00:00 --hours 24 --unit MW `
   --branch-crosswalk "D:\...\branch_crosswalk.json" `
   --analysis-timezone UTC --mode analysis-only `
@@ -209,6 +211,14 @@ timestamps, and retries failed/interrupted timestamps. Reusing a populated
 output directory without `--resume` is rejected. Modes are `analysis-only` and `sv-store`;
 `native-schedule` is explicitly rejected until a real ODMS schedule API is
 implemented. `StoreSolutionState()` is SV persistence, not a native schedule.
+
+Generic `--load-series` and RTS-specific `--rts-regional-load` are mutually
+exclusive. Both are normalized to the same runtime load rows. Exact naive
+timestamps, finite P/Q, one row per source load, approved one-to-one ODMS
+targets, and complete identities are fail-closed by default; `--missing-load
+preserve` is the only explicit exception. Provenance, Q policy, input mode and
+source hashes are retained in normalized CSV, OperatingSnapshot, audit and run
+manifest.
 
 ## Run inside ODMS
 

@@ -20,6 +20,7 @@ from .plexos_solution.dispatch import SolutionSelection
 from .plexos_solution.commitment import build_class_aware_statuses, read_commitment
 from .plexos_solution.reader import read_dispatch
 from .plexos_solution.regional_load import allocate_rts_nodal_load, read_rts_regional_load
+from .plexos_solution.load_series import read_normalized_load_series
 from .time_semantics import SourceTimeContext
 from .validation import ValidationReport
 
@@ -38,6 +39,7 @@ class SnapshotConfig:
     analysis_timezone: str | None = None
     status_mode: str = "crosswalk_commitment"
     q_limit_policy: str = "validate_only"
+    missing_load_policy: str = "error"
 
 
 @dataclass
@@ -80,6 +82,7 @@ class SnapshotResult:
         target.parent.mkdir(parents=True, exist_ok=True)
         fields = [
             "timestamp",
+            "source_load_id",
             "source_bus_id",
             "source_region",
             "regional_load_mw",
@@ -98,7 +101,7 @@ class SnapshotResult:
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
             for row in self.load_rows:
-                writer.writerow({name: row[name] for name in fields})
+                writer.writerow({name: row.get(name) for name in fields})
 
     def write_operating_snapshot(self, path: str | Path) -> None:
         q_limit_policy = {
@@ -182,6 +185,7 @@ def build_dispatch_snapshot(
     config: SnapshotConfig | None = None,
     dependent_on: str | None = None,
     regional_load_path: str | Path | None = None,
+    load_series_path: str | Path | None = None,
     load_crosswalk_path: str | Path | None = None,
     commitment_path: str | Path | None = None,
     branch_crosswalk_path: str | Path | None = None,
@@ -200,8 +204,12 @@ def build_dispatch_snapshot(
     solution = Path(solution_path)
     crosswalk_file = Path(crosswalk_path)
     target_cim = Path(target_cim_path)
-    if (regional_load_path is None) != (load_crosswalk_path is None):
-        raise ValueError("regional_load_path and load_crosswalk_path must be supplied together")
+    if regional_load_path is not None and load_series_path is not None:
+        raise ValueError("Generic load series and RTS regional load are mutually exclusive")
+    if load_crosswalk_path is None and (regional_load_path is not None or load_series_path is not None):
+        raise ValueError("load_crosswalk_path is required with any load input")
+    if load_crosswalk_path is not None and regional_load_path is None and load_series_path is None:
+        raise ValueError("A generic load series or RTS regional load is required")
     selection = SolutionSelection(
         config.phase, config.period, timestamp, config.sample, config.unit
     )
@@ -315,13 +323,21 @@ def build_dispatch_snapshot(
         )
     load_rows: list[dict] = []
     regional_values: dict[str, float] = {}
-    if regional_load_path is not None and load_crosswalk_path is not None:
+    load_source_mode: str | None = None
+    if load_crosswalk_path is not None:
         load_crosswalk_file = Path(load_crosswalk_path)
-        regional_file = Path(regional_load_path)
         load_mappings = load_load_crosswalk(load_crosswalk_file)
         try:
-            regional_values = read_rts_regional_load(regional_file, timestamp)
-            load_rows = allocate_rts_nodal_load(regional_values, load_mappings)
+            if load_series_path is not None:
+                load_source_mode = "generic_normalized"
+                load_rows = read_normalized_load_series(
+                    load_series_path, timestamp, load_mappings,
+                    missing_policy=config.missing_load_policy,
+                )
+            else:
+                load_source_mode = "rts_regional_profile"
+                regional_values = read_rts_regional_load(Path(regional_load_path), timestamp)
+                load_rows = allocate_rts_nodal_load(regional_values, load_mappings)
         except ValueError as exc:
             report.error("LOAD_SNAPSHOT_INVALID", str(exc))
         for row in load_rows:
@@ -329,10 +345,7 @@ def build_dispatch_snapshot(
             row["source_wall_clock"] = timestamp.isoformat()
             row["source_time_basis"] = config.source_time_basis
             row["source_timezone"] = config.source_timezone
-        report.info(
-            "LOAD_Q_POLICY",
-            "Load P is allocated from authoritative RTS day-ahead regional demand; Q uses preserve_base_pf and is derived AC embedding, not PLEXOS output.",
-        )
+        report.info("LOAD_INPUT_NORMALIZED", f"Load source mode {load_source_mode} produced the generic load-row contract.")
     else:
         report.warning(
             "LOAD_SNAPSHOT_ABSENT",
@@ -466,21 +479,11 @@ def build_dispatch_snapshot(
         },
         "target_cim": {"path": str(target_cim.resolve()), "sha256": _sha256(target_cim)},
     }
-    if regional_load_path is not None and load_crosswalk_path is not None:
-        regional_file = Path(regional_load_path)
+    if load_crosswalk_path is not None:
         load_crosswalk_file = Path(load_crosswalk_path)
-        sources.update(
-            {
-                "regional_load": {
-                    "path": str(regional_file.resolve()),
-                    "sha256": _sha256(regional_file),
-                },
-                "load_crosswalk": {
-                    "path": str(load_crosswalk_file.resolve()),
-                    "sha256": _sha256(load_crosswalk_file),
-                },
-            }
-        )
+        sources["load_crosswalk"] = {"path": str(load_crosswalk_file.resolve()), "sha256": _sha256(load_crosswalk_file)}
+        load_input = Path(load_series_path) if load_series_path is not None else Path(regional_load_path)
+        sources["load_input"] = {"path": str(load_input.resolve()), "sha256": _sha256(load_input), "mode": load_source_mode}
     if effective_commitment_path is not None:
         commitment_file = Path(effective_commitment_path)
         sources["commitment"] = {
@@ -517,11 +520,14 @@ def build_dispatch_snapshot(
             "ssh_dependency": dependency,
         },
         "load_mapping": {
+            "load_source_mode": load_source_mode,
             "mapped_rows": len(load_rows),
             "regional_mw": regional_values,
             "load_p_mw_total": load_p_total,
             "load_q_mvar_total": load_q_total,
-            "q_policy": "preserve_base_pf" if load_rows else None,
+            "q_policies": sorted({row["q_policy"] for row in load_rows}),
+            "p_provenance": sorted({row["p_provenance"] for row in load_rows}),
+            "q_provenance": sorted({row["q_provenance"] for row in load_rows}),
         },
         "preflight": {
             "generator_requested_mw": generator_total,
@@ -561,7 +567,7 @@ def build_dispatch_snapshot(
     audit["ssh_dependency"] = dependency
     return SnapshotResult(
         sorted(rows, key=lambda item: item["source_generator"]),
-        sorted(load_rows, key=lambda item: int(item["source_bus_id"])),
+        sorted(load_rows, key=lambda item: item["source_load_id"]),
         status_rows,
         audit_unit_rows,
         branch_rating_rows,

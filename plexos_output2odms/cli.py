@@ -87,7 +87,8 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--sample", default="Mean")
     snapshot.add_argument("--unit", default=None, help="Required for wide files, normally MW")
     snapshot.add_argument("--dependent-on", default=None, help="Authoritative target EQ FullModel URI")
-    snapshot.add_argument("--regional-load", type=Path, default=None)
+    snapshot.add_argument("--rts-regional-load", "--regional-load", dest="regional_load", type=Path, default=None)
+    snapshot.add_argument("--load-series", type=Path, default=None)
     snapshot.add_argument("--load-crosswalk", type=Path, default=None)
     snapshot.add_argument("--commitment", type=Path, default=None)
     snapshot.add_argument("--branch-crosswalk", type=Path, default=None)
@@ -104,6 +105,7 @@ def _parser() -> argparse.ArgumentParser:
         default="error",
         help="Fail by default; preserve leaves ODMS ScheduledMW unchanged for absent generators",
     )
+    snapshot.add_argument("--missing-load", choices=["error", "preserve"], default="error")
 
     run = commands.add_parser("run-odms", help="Apply a complete operating snapshot and solve PF")
     run.add_argument("operating_snapshot", type=Path)
@@ -118,13 +120,12 @@ def _parser() -> argparse.ArgumentParser:
     series.add_argument("solution", type=Path)
     series.add_argument("crosswalk", type=Path)
     series.add_argument("target_cim", type=Path)
-    series.add_argument("regional_load", type=Path)
-    series.add_argument("load_crosswalk", type=Path)
-    series.add_argument(
-        "commitment", type=Path, nargs="?", default=None,
-        help="External commitment CSV; omit for native Solution ZIP Units Generating",
-    )
     series.add_argument("output_directory", type=Path)
+    load_group = series.add_mutually_exclusive_group(required=True)
+    load_group.add_argument("--load-series", type=Path)
+    load_group.add_argument("--rts-regional-load", type=Path, dest="regional_load")
+    series.add_argument("--load-crosswalk", type=Path, required=True)
+    series.add_argument("--commitment", type=Path, default=None, help="Omit for native Solution ZIP Units Generating")
     series.add_argument("--start", default=None)
     series.add_argument("--hours", type=int, default=None)
     series.add_argument("--unit", default="MW")
@@ -141,6 +142,7 @@ def _parser() -> argparse.ArgumentParser:
         "--missing-dispatch", choices=["error", "preserve"], default="preserve",
         help="Preserve approved resources absent from dispatch (RTS CSP/storage are deferred)",
     )
+    series.add_argument("--missing-load", choices=["error", "preserve"], default="error")
     series.add_argument("--min-voltage-pu", type=float, default=0.9)
     series.add_argument("--max-voltage-pu", type=float, default=1.1)
     series.add_argument("--max-loading-percent", type=float, default=100.0)
@@ -298,9 +300,11 @@ def main(argv: list[str] | None = None) -> int:
                     analysis_timezone=args.analysis_timezone,
                     status_mode=args.status_mode,
                     q_limit_policy=args.q_limit_policy,
+                    missing_load_policy=args.missing_load,
                 ),
                 dependent_on=args.dependent_on,
                 regional_load_path=args.regional_load,
+                load_series_path=args.load_series,
                 load_crosswalk_path=args.load_crosswalk,
                 commitment_path=args.commitment,
                 branch_crosswalk_path=args.branch_crosswalk,
@@ -353,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 analysis_timezone=args.analysis_timezone,
                 status_mode=args.status_mode,
                 q_limit_policy=args.q_limit_policy,
+                missing_load_policy=args.missing_load,
             )
             manifest = run_timeseries(
                 args.solution,
@@ -360,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.target_cim,
                 args.output_directory,
                 regional_load=args.regional_load,
+                load_series=args.load_series,
                 load_crosswalk=args.load_crosswalk,
                 commitment=args.commitment,
                 branch_crosswalk=args.branch_crosswalk,
