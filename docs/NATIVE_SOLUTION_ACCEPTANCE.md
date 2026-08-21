@@ -1,0 +1,59 @@
+# Native PLEXOS Solution ZIP acceptance
+
+## Contract
+
+V1 reads the following properties directly from one native Solution ZIP:
+
+```text
+ST / Interval / Generators / Generation       -> ScheduledMW
+ST / Interval / Generators / Units Generating -> approved status policy
+```
+
+Timestamp, phase, period, and sample selection are shared. Embedded power units
+are validated; energy summaries remain prohibited. The solution ZIP is decoded
+once per process and reused by the timestamp, dispatch, and commitment readers.
+
+Load P/Q, generator identity, static AC controls, branch limits, and the target
+ODMS network are snapshot context. They may be external, but every approved
+contract must describe the same physical system.
+
+## Automated acceptance
+
+Tests cover:
+
+- native ZIP Generation with embedded MW units;
+- native timestamp enumeration;
+- locale-ambiguous date text reconciled using PLEXOS calendar metadata;
+- native binary Units Generating;
+- automatic same-ZIP commitment when an external file is omitted;
+- identity equality and duplicate/band/sample safety inherited from the shared
+  native property reader.
+
+The full regression suite passes 37 tests.
+
+## Public native ZIP smoke
+
+Source: Energy Exemplar `Python-PLEXOS-API`, commit
+`8aa8ae43bc85b8b8e346ba9ddce9252e48d70177`, file
+`Solution Files/Model Q2 Week1 DA Solution.zip`.
+
+- SHA-256: `c4f1c2a656eec717ac6a5d18be122f6d4ffb0d89e96c0f87d96b77ee2a6f8967`
+- Native Generation timestamps: 168, from `2024-04-01 00:00` through
+  `2024-04-07 23:00`.
+- 24-hour smoke: 3,744 Generation rows and 3,744 Units Generating rows.
+- Generator identity equality between both properties: 24/24 hours.
+- Commitment values: binary `{0, 1}` for all 3,744 rows.
+- First decode plus 24-hour paired-property read: 15.621 seconds on the local
+  commissioning machine.
+
+This public solution belongs to a different physical model than the local ODMS
+RTS-GMLC case. It is therefore used for native parser acceptance only; applying
+it through the RTS crosswalk would be an invalid identity experiment. Real ODMS
+snapshot execution remains proven by the separate RTS-GMLC 24-hour and 336-hour
+campaigns using the same normalized pipeline/runtime boundary.
+
+## Deferred
+
+- Storage charging/discharging semantics.
+- CSP-specific operating semantics.
+- Native ODMS schedule persistence (`StoreSolutionState()` remains SV only).

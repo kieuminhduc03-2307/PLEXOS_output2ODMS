@@ -5,7 +5,7 @@ validated PSS®ODMS operating snapshots. It is deliberately separate from the
 PLEXOS model XML ↔ CIM equipment adapter.
 
 ```text
-PLEXOS Solution / Generation table
+PLEXOS Solution / Generation + Units Generating
                   │
                   ▼
        exact timestamp selection
@@ -34,8 +34,10 @@ The adapter never writes dispatch to `GeneratingUnit.nominalP`,
 
 ## Supported inputs
 
-- Native PLEXOS Solution ZIP table `ST__Interval__Generators__Generation`
-  through the optional `plexosdb` dependency.
+- Native PLEXOS Solution ZIP tables
+  `ST__Interval__Generators__Generation` and
+  `ST__Interval__Generators__Units Generating` through the optional `plexosdb`
+  dependency. Native ZIP timestamp discovery is supported for batch runs.
 - Wide interval table used by the RTS-GMLC test:
   `time,Generator A,Generator B,...`.
 - Energy Exemplar long query CSV with `child_name`, `property_name`, `_date`,
@@ -43,6 +45,29 @@ The adapter never writes dispatch to `GeneratingUnit.nominalP`,
 
 Wide tables have no embedded unit metadata, so `--unit MW` is mandatory.
 MWh/GWh summary values are rejected as dispatch.
+
+For a native ZIP, the archive is decoded once per adapter process and reused for
+timestamp, Generation, and Units Generating queries. Locale-ambiguous date text
+is reconciled against PLEXOS year/month/day metadata. Omitting the commitment
+argument makes `build-snapshot` and `run-timeseries` use Units Generating from
+the same ZIP; an external commitment CSV remains supported.
+
+Native one-file batch form (snapshot context remains external and approved):
+
+```powershell
+python -m plexos_output2odms run-timeseries `
+  "D:\...\Model Solution.zip" `
+  "D:\...\generator_crosswalk.json" `
+  "D:\...\target_cim.xml" `
+  "D:\...\regional_load.csv" `
+  "D:\...\load_crosswalk.json" `
+  "D:\...\native_solution_snapshots" `
+  --analysis-timezone UTC --branch-crosswalk "D:\...\branch_crosswalk.json"
+```
+
+The positional commitment file is intentionally omitted in this form. The
+approved generator crosswalk, load context, static AC controls, branch limits,
+and target ODMS model must describe the same physical system as the ZIP.
 
 RTS commissioning uses the upstream
 [GridMod/RTS-GMLC](https://github.com/GridMod/RTS-GMLC) `bus.csv`, regional
@@ -223,10 +248,13 @@ The ODMS 14.2 installation links Python 3.13; the launcher temporarily prepends
 the local Python 3.13 runtime to `PATH` for the child process.
 
 See [RTS-GMLC acceptance](docs/RTS_GMLC_ACCEPTANCE.md) and
-[architecture](docs/ARCHITECTURE.md) for the exact result and safety boundary.
+[native Solution acceptance](docs/NATIVE_SOLUTION_ACCEPTANCE.md), plus
+[architecture](docs/ARCHITECTURE.md), for the exact result and safety boundary.
 
 This repository is an RTS-GMLC reference adapter plus a reusable ODMS execution
 core. Its RTS crosswalk builders, regional load allocation, and source-file
 parsers are benchmark-specific. A generic production integration must provide
 approved normalized identity, load, AC-control, and branch-limit contracts
 instead of applying RTS naming or allocation assumptions to another model.
+V1 covers Generator dispatch and binary one-to-one Units Generating commitment.
+Storage charging/discharging and CSP-specific operating semantics are deferred.

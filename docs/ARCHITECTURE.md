@@ -87,9 +87,16 @@ their charging/discharging contracts are commissioned.
 A snapshot is uniquely selected by phase, period, source wall clock and
 sample. No timezone is attached to a naive PLEXOS value. `timestamp_utc` exists
 only when source time basis is explicitly known; analysis timezone is a separate
-ODMS embedding choice. The native reader accepts only `ST / Interval / Generator / Generation` as native ZIP
-dispatch. Ambiguous stochastic samples, duplicate timestamps, duplicate targets,
+ODMS embedding choice. The native reader accepts `ST / Interval / Generator /
+Generation` as dispatch and `Units Generating` as commitment. It enumerates
+native timestamps from Generation interval IDs and reconciles date strings with
+the explicit PLEXOS calendar columns. The ZIP is decoded once and its in-memory
+SQLite connection is reused within the process. Ambiguous stochastic samples, duplicate timestamps, duplicate targets,
 non-power units, out-of-range values and incomplete mappings fail closed.
+
+If no external commitment file is supplied for a native ZIP, the pipeline reads
+Units Generating from that same solution, with the same phase, period, sample,
+and timestamp selection. Generation is never used to infer status.
 
 ## Time-series policy
 
@@ -107,6 +114,15 @@ Season/DayType/TimeOfDay schedule schema and does not infer commitment from
 Runtime modes are `analysis-only` and `sv-store`. `native-schedule` is reserved
 and rejected; `StoreSolutionState()` persists SV and is not represented as a
 native ODMS schedule.
+
+## V1 scope
+
+V1 is a Generator dispatch + binary one-to-one commitment adapter. Snapshot
+context (load, static AC controls, limits, and target network) may come from
+approved external systems and must represent the same physical model. Storage
+charge/discharge and CSP-specific operating semantics are explicitly deferred;
+resources without an approved typed contract remain preserved rather than being
+inferred from negative or zero Generation.
 
 ## Transaction boundary
 

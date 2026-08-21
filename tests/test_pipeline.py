@@ -8,6 +8,8 @@ from pathlib import Path
 
 from plexos_output2odms.crosswalk.generator_dispatch import GeneratorMapping, write_crosswalk
 from plexos_output2odms.pipeline import SnapshotConfig, build_dispatch_snapshot, write_snapshot_outputs
+import plexos_output2odms.pipeline as pipeline_module
+from plexos_output2odms.plexos_solution.dispatch import DispatchRecord
 
 
 def mapping(name: str, mrid: str, *, approved: bool = True) -> GeneratorMapping:
@@ -128,3 +130,60 @@ def test_reactive_limits_are_validate_only_by_default_and_apply_requires_opt_in(
         "APPLY_SOURCE_STATIC_CAPABILITY"
     )
     assert apply_result.audit["generator_ac_controls"]["runtime_mutation_authorized"]
+
+
+def test_native_zip_uses_embedded_units_generating_when_commitment_is_omitted(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "Case Solution.zip"
+    source.write_bytes(b"native-fixture")
+    target = tmp_path / "target.xml"
+    target.write_text(
+        "<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'/>",
+        encoding="utf-8",
+    )
+    native_mapping = GeneratorMapping(
+        **{
+            **mapping("G1", "machine-1").__dict__,
+            "source_operating_class": "CT",
+            "status_policy": "BINARY_COMMITMENT",
+        }
+    )
+    crosswalk = tmp_path / "crosswalk.json"
+    write_crosswalk([native_mapping], crosswalk, source_model="model.xml", target_cim=str(target))
+    timestamp = datetime(2024, 4, 5)
+    monkeypatch.setattr(
+        pipeline_module,
+        "read_dispatch",
+        lambda path, selected: [
+            DispatchRecord(timestamp, "G1", 76.0, "MW", "ST", "Interval", "Mean", 101)
+        ],
+    )
+    observed = {}
+
+    def embedded_commitment(path, selected_timestamp, **kwargs):
+        observed["path"] = Path(path)
+        observed["timestamp"] = selected_timestamp
+        observed.update(kwargs)
+        return {"G1": 1.0}
+
+    monkeypatch.setattr(pipeline_module, "read_commitment", embedded_commitment)
+    result = build_dispatch_snapshot(
+        source,
+        crosswalk,
+        target,
+        timestamp=timestamp,
+        config=SnapshotConfig(unit=None),
+    )
+    assert result.report.ok
+    assert observed == {
+        "path": source,
+        "timestamp": timestamp,
+        "phase": "ST",
+        "period": "Interval",
+        "sample": "Mean",
+    }
+    assert result.status_rows[0]["requested_in_service"] is True
+    assert result.audit["sources"]["commitment"]["property"] == (
+        "Generator.Units Generating"
+    )

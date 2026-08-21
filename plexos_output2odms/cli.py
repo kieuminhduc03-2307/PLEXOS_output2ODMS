@@ -120,7 +120,10 @@ def _parser() -> argparse.ArgumentParser:
     series.add_argument("target_cim", type=Path)
     series.add_argument("regional_load", type=Path)
     series.add_argument("load_crosswalk", type=Path)
-    series.add_argument("commitment", type=Path)
+    series.add_argument(
+        "commitment", type=Path, nargs="?", default=None,
+        help="External commitment CSV; omit for native Solution ZIP Units Generating",
+    )
     series.add_argument("output_directory", type=Path)
     series.add_argument("--start", default=None)
     series.add_argument("--hours", type=int, default=None)

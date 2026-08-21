@@ -4,6 +4,9 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+from .dispatch import SolutionSelection
+from .reader import _read_native_generator_property
+
 
 def read_wide_commitment(path: str | Path, timestamp: datetime) -> dict[str, float]:
     if timestamp.tzinfo is not None:
@@ -30,6 +33,35 @@ def read_wide_commitment(path: str | Path, timestamp: datetime) -> dict[str, flo
                 f"V1 commitment requires 1:1 binary Units Generating; {name} has {value}"
             )
         result[name] = value
+    return result
+
+
+def read_commitment(
+    path: str | Path,
+    timestamp: datetime,
+    *,
+    phase: str = "ST",
+    period: str = "Interval",
+    sample: str = "Mean",
+) -> dict[str, float]:
+    source = Path(path)
+    if source.suffix.casefold() != ".zip":
+        return read_wide_commitment(source, timestamp)
+    selection = SolutionSelection(phase, period, timestamp, sample, None)
+    rows = _read_native_generator_property(source, selection, "Units Generating")
+    result = {}
+    for row in rows:
+        value = float(row["value"])
+        if row["unit"] not in {"", "-"}:
+            raise ValueError(
+                f"Native Units Generating for {row['object_name']} has unexpected unit {row['unit']!r}"
+            )
+        if value not in (0.0, 1.0):
+            raise ValueError(
+                "V1 commitment requires 1:1 binary Units Generating; "
+                f"{row['object_name']} has {value}"
+            )
+        result[row["object_name"]] = value
     return result
 
 

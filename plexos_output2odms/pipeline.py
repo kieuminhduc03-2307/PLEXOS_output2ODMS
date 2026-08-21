@@ -17,7 +17,7 @@ from .crosswalk.load_snapshot import load_load_crosswalk
 from .crosswalk.branch_ratings import load_branch_rating_crosswalk
 from .odms.ssh import write_ssh
 from .plexos_solution.dispatch import SolutionSelection
-from .plexos_solution.commitment import build_class_aware_statuses, read_wide_commitment
+from .plexos_solution.commitment import build_class_aware_statuses, read_commitment
 from .plexos_solution.reader import read_dispatch
 from .plexos_solution.regional_load import allocate_rts_nodal_load, read_rts_regional_load
 from .time_semantics import SourceTimeContext
@@ -388,10 +388,19 @@ def build_dispatch_snapshot(
                 else "Optimized P is updated and all ODMS unit statuses are preserved."
             ),
         )
-    elif config.status_mode == "crosswalk_commitment" and commitment_path is not None:
-        commitment_file = Path(commitment_path)
+    effective_commitment_path = commitment_path
+    if effective_commitment_path is None and solution.suffix.casefold() == ".zip":
+        effective_commitment_path = solution
+    if config.status_mode == "crosswalk_commitment" and effective_commitment_path is not None:
+        commitment_file = Path(effective_commitment_path)
         try:
-            commitment = read_wide_commitment(commitment_file, timestamp)
+            commitment = read_commitment(
+                commitment_file,
+                timestamp,
+                phase=config.phase,
+                period=config.period,
+                sample=config.sample,
+            )
             status_rows = build_class_aware_statuses(commitment, rows)
         except ValueError as exc:
             report.error("COMMITMENT_INVALID", str(exc))
@@ -404,7 +413,7 @@ def build_dispatch_snapshot(
             "COMMITMENT_ABSENT",
             "No Units Generating layer was supplied; ODMS base-case unit statuses are preserved.",
         )
-    else:
+    elif config.status_mode not in {"preserve_odms", "dispatch_on_only"}:
         report.error("STATUS_MODE_INVALID", f"Unsupported status mode: {config.status_mode}")
 
     setpoint_mrids = {row["target_machine_mrid"] for row in rows}
@@ -472,11 +481,16 @@ def build_dispatch_snapshot(
                 },
             }
         )
-    if commitment_path is not None:
-        commitment_file = Path(commitment_path)
+    if effective_commitment_path is not None:
+        commitment_file = Path(effective_commitment_path)
         sources["commitment"] = {
             "path": str(commitment_file.resolve()),
             "sha256": _sha256(commitment_file),
+            "property": (
+                "Generator.Units Generating"
+                if commitment_file.suffix.casefold() == ".zip"
+                else "wide commitment table"
+            ),
         }
     if branch_crosswalk_path is not None:
         branch_crosswalk_file = Path(branch_crosswalk_path)

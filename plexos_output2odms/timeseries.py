@@ -216,7 +216,7 @@ def run_timeseries(
     *,
     regional_load: Path,
     load_crosswalk: Path,
-    commitment: Path,
+    commitment: Path | None,
     branch_crosswalk: Path | None,
     config: TimeSeriesConfig,
 ) -> dict:
@@ -251,7 +251,14 @@ def run_timeseries(
         raise ValueError("Output directory is not empty; use --resume or a new directory")
     output.mkdir(parents=True, exist_ok=True)
 
-    source_files = [solution, crosswalk, target_cim, regional_load, load_crosswalk, commitment]
+    effective_commitment = commitment
+    if effective_commitment is None and solution.suffix.casefold() == ".zip":
+        effective_commitment = solution
+    if effective_commitment is None:
+        raise ValueError("Commitment input is required for non-native solution sources")
+    source_files = [solution, crosswalk, target_cim, regional_load, load_crosswalk]
+    if effective_commitment not in source_files:
+        source_files.append(effective_commitment)
     if branch_crosswalk is not None:
         source_files.append(branch_crosswalk)
     source_records = [
@@ -341,7 +348,7 @@ def run_timeseries(
                 config=config.snapshot,
                 regional_load_path=regional_load,
                 load_crosswalk_path=load_crosswalk,
-                commitment_path=commitment,
+                commitment_path=effective_commitment,
                 branch_crosswalk_path=branch_crosswalk,
             )
             outputs = write_snapshot_outputs(result, directory, scenario_time=context.analysis_aware)
