@@ -7,12 +7,15 @@ the child process `PATH`.
 Safe commissioning order:
 
 1. Run `build-snapshot` and require validation PASS.
-2. Review the approved crosswalk and the two source hashes in the audit.
+2. Review both approved crosswalks, commitment policy and all source hashes.
 3. Run the ODMS launcher without `-StoreSV`.
-4. Require exact Unit mRID resolution and ScheduledMW readback within tolerance.
-5. Require PF convergence and inspect slack/loss behavior.
-6. Only then rerun with `-StoreSV` if persistence is desired.
+4. Require exact Load/Unit mRID resolution and P/Q/status readback.
+5. Require preflight P balance and `MismatchDistribution=SwingBus` audit.
+6. Require PF convergence and `GenerationMW ≈ LoadMW + LossMW` within the
+   configured postflight tolerance.
+7. Only then rerun with `-StoreSV` if persistence is desired.
 
 The response JSON separates requested dispatch, initialized `ScheduledMW` and
-solved `PresentMW/Mvar/kV`. A slack-machine difference after PF is not by itself
-an adapter error.
+solved values. For RTS-GMLC, use `PowerFlowSummary` for the system balance because
+`Unit.PresentMW` excludes ODMS swing compensation. The launcher defaults to a
+`0.001 MW` postflight residual gate and refuses StoreSV when it fails.

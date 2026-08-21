@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- Added approved RTS bus/load-ID → ODMS mRID crosswalks.
+- Added official RTS regional-to-nodal active load allocation and auditable
+  `preserve_base_pf` reactive embedding.
+- Added typed `OperatingSnapshot` JSON plus normalized load/status artifacts.
+- Added class-aware PLEXOS `Units Generating` handling: binary thermal/hydro,
+  ON-only variable renewables, preserved synchronous condensers.
+- Added load/status/generator identity verification and deterministic runtime
+  order before PF.
+- Added preflight balance, SwingBus policy audit, full ODMS power-flow summary,
+  AC-loss postflight gate, and StoreSV protection.
+- Commissioned the 2020-07-05 00:00 RTS-GMLC snapshot successfully in ODMS
+  14.2.3.1 without persisting SV.
+
 ## 0.1.0
 
 - Add wide result, Energy Exemplar query CSV and native Solution ZIP readers.

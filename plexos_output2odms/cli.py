@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .crosswalk.generator_dispatch import build_rts_gmlc_crosswalk, write_crosswalk
+from .crosswalk.load_snapshot import build_rts_gmlc_load_crosswalk, write_load_crosswalk
 from .odms.runtime import apply_dispatch_and_solve
 from .pipeline import SnapshotConfig, build_dispatch_snapshot, write_snapshot_outputs
 from .plexos_solution.reader import inspect_solution
@@ -38,6 +39,15 @@ def _parser() -> argparse.ArgumentParser:
     crosswalk.add_argument("--profile", choices=["rts-gmlc"], default="rts-gmlc")
     crosswalk.add_argument("--approve", action="store_true", help="Explicitly approve generated exact mappings")
 
+    load_crosswalk = commands.add_parser(
+        "build-load-crosswalk", help="Build an exact RTS-GMLC bus-load-to-ODMS mapping"
+    )
+    load_crosswalk.add_argument("bus_data", type=Path)
+    load_crosswalk.add_argument("odms_cim", type=Path)
+    load_crosswalk.add_argument("output", type=Path)
+    load_crosswalk.add_argument("--profile", choices=["rts-gmlc"], default="rts-gmlc")
+    load_crosswalk.add_argument("--approve", action="store_true")
+
     snapshot = commands.add_parser("build-snapshot", help="Build one validated dispatch snapshot")
     snapshot.add_argument("solution", type=Path)
     snapshot.add_argument("crosswalk", type=Path)
@@ -50,6 +60,10 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--sample", default="Mean")
     snapshot.add_argument("--unit", default=None, help="Required for wide files, normally MW")
     snapshot.add_argument("--dependent-on", default=None, help="Authoritative target EQ FullModel URI")
+    snapshot.add_argument("--regional-load", type=Path, default=None)
+    snapshot.add_argument("--load-crosswalk", type=Path, default=None)
+    snapshot.add_argument("--commitment", type=Path, default=None)
+    snapshot.add_argument("--balance-tolerance-mw", type=float, default=1e-6)
     snapshot.add_argument(
         "--missing-dispatch",
         choices=["error", "preserve"],
@@ -57,8 +71,8 @@ def _parser() -> argparse.ArgumentParser:
         help="Fail by default; preserve leaves ODMS ScheduledMW unchanged for absent generators",
     )
 
-    run = commands.add_parser("run-odms", help="Apply ScheduledMW to the active ODMS case and solve PF")
-    run.add_argument("normalized_csv", type=Path)
+    run = commands.add_parser("run-odms", help="Apply a complete operating snapshot and solve PF")
+    run.add_argument("operating_snapshot", type=Path)
     run.add_argument("result_json", type=Path)
     run.add_argument("--mode", choices=["direct", "ssh"], default="direct")
     run.add_argument("--ssh", type=Path, default=None)
@@ -84,6 +98,23 @@ def _read_normalized(path: Path) -> list[dict]:
     return rows
 
 
+def _read_operating_snapshot(
+    path: Path,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    if path.suffix.lower() == ".csv":
+        return _read_normalized(path), [], [], []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "plexos-output2odms-operating-snapshot-v1":
+        raise ValueError("Unsupported operating snapshot schema")
+    generators = payload.get("generator_setpoints", [])
+    loads = payload.get("load_setpoints", [])
+    statuses = payload.get("unit_statuses", [])
+    audit_units = payload.get("audit_units", [])
+    if not generators:
+        raise ValueError("Operating snapshot contains no generator setpoints")
+    return generators, loads, statuses, audit_units
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -104,6 +135,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Crosswalk: {args.output}")
             print(f"Mappings:  {len(mappings)} ({'approved' if args.approve else 'review required'})")
             return 0
+        if args.command == "build-load-crosswalk":
+            mappings = build_rts_gmlc_load_crosswalk(
+                args.bus_data, args.odms_cim, approved=args.approve
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            write_load_crosswalk(
+                mappings,
+                args.output,
+                source_bus_data=str(args.bus_data.resolve()),
+                target_cim=str(args.odms_cim.resolve()),
+            )
+            print(f"Load crosswalk: {args.output}")
+            print(f"Mappings:       {len(mappings)} ({'approved' if args.approve else 'review required'})")
+            return 0
         if args.command == "build-snapshot":
             timestamp = _timestamp(args.timestamp, args.timezone)
             result = build_dispatch_snapshot(
@@ -117,17 +162,26 @@ def main(argv: list[str] | None = None) -> int:
                     sample=args.sample,
                     unit=args.unit,
                     missing_dispatch_policy=args.missing_dispatch,
+                    preflight_balance_tolerance_mw=args.balance_tolerance_mw,
                 ),
                 dependent_on=args.dependent_on,
+                regional_load_path=args.regional_load,
+                load_crosswalk_path=args.load_crosswalk,
+                commitment_path=args.commitment,
             )
             outputs = write_snapshot_outputs(result, args.output_directory, scenario_time=timestamp)
             print(result.report.format_text())
             print(json.dumps(outputs, indent=2))
             return 0 if result.report.ok else 2
         if args.command == "run-odms":
-            rows = _read_normalized(args.normalized_csv)
+            rows, load_rows, statuses, audit_units = _read_operating_snapshot(
+                args.operating_snapshot
+            )
             result = apply_dispatch_and_solve(
                 rows,
+                load_rows=load_rows,
+                status_rows=statuses,
+                audit_unit_rows=audit_units,
                 ssh_path=args.ssh,
                 use_ssh=args.mode == "ssh",
                 store_sv=args.store_sv,
@@ -137,6 +191,11 @@ def main(argv: list[str] | None = None) -> int:
                 "sv_stored": result.sv_stored,
                 "power_flow_summary": result.power_flow_summary,
                 "rows": result.rows,
+                "load_rows": result.load_rows,
+                "status_rows": result.status_rows,
+                "audit_unit_rows": result.audit_unit_rows,
+                "preflight": result.preflight,
+                "postflight": result.postflight,
             }
             args.result_json.parent.mkdir(parents=True, exist_ok=True)
             args.result_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

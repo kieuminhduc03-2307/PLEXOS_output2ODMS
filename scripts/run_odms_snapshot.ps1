@@ -1,10 +1,12 @@
 param(
-    [Parameter(Mandatory=$true)][string]$NormalizedCsv,
+    [Parameter(Mandatory=$true)][string]$OperatingSnapshot,
     [Parameter(Mandatory=$true)][string]$ResponseJson,
     [string]$Server = '.\SQLEXPRESS',
     [string]$Model = 'RTS-GMLC',
     [switch]$StoreSV,
-    [double]$ReadbackToleranceMW = 0.0001
+    [ValidateSet('AuditOnly','SwingBus')][string]$MismatchDistribution = 'SwingBus',
+    [double]$ReadbackToleranceMW = 0.0001,
+    [double]$PostflightBalanceToleranceMW = 0.001
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,10 +15,12 @@ $worker = Join-Path $PSScriptRoot 'odms_dispatch_worker.py'
 $requestPath = [System.IO.Path]::ChangeExtension($ResponseJson, '.request.json')
 $request = @{
     repo_root = $repoRoot
-    normalized_csv = [System.IO.Path]::GetFullPath($NormalizedCsv)
+    operating_snapshot = [System.IO.Path]::GetFullPath($OperatingSnapshot)
     response_json = [System.IO.Path]::GetFullPath($ResponseJson)
     store_sv = [bool]$StoreSV
     readback_tolerance_mw = $ReadbackToleranceMW
+    postflight_balance_tolerance_mw = $PostflightBalanceToleranceMW
+    mismatch_distribution = $MismatchDistribution
 }
 $request | ConvertTo-Json | Set-Content -LiteralPath $requestPath -Encoding UTF8
 

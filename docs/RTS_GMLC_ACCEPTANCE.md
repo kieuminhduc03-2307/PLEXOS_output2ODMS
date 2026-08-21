@@ -1,63 +1,70 @@
 # RTS-GMLC acceptance - 2026-08-21
 
-## Inputs
+## Golden operating point
 
-- PLEXOS model: `RTS-GMLC.txt` - 158 Generator objects.
-- PLEXOS dispatch: `PLEXOS_DA_solution_generation.txt` - 336 hourly rows,
-  2020-07-05 00:00 through 2020-07-18 23:00, 156 Generator columns.
-- ODMS 14.2.3.1 model `RTS-GMLC` on `.\SQLEXPRESS`.
-- ODMS CIM17 reference - 160 SynchronousMachine resources.
-- Selected timestamp: 2020-07-05 00:00 Asia/Ho_Chi_Minh.
+- Timestamp: `2020-07-05 00:00 Asia/Ho_Chi_Minh` (RTS Period 1).
+- PLEXOS Generation: local allTX result, 156 columns.
+- Commitment: official allTX `PLEXOS_DA_solution_commitment.csv`; its Generation
+  companion was compared with the local file and all 156 values were identical.
+- Load P: official `DAY_AHEAD_regional_Load.csv` allocated using official
+  `bus.csv` proportions.
+- Load Q: derived AC embedding `preserve_base_pf`, not claimed as PLEXOS output.
+- Target: ODMS 14.2.3.1 model `RTS-GMLC` on `.\SQLEXPRESS`.
 
-## Conversion result
-
-| Check | Result |
-|---|---:|
-| Crosswalk records | 158 |
-| Dispatch columns at timestamp | 156 |
-| Source values mapped to ScheduledMW | 156/156 exact in Python representation |
-| SSH machine resources | 156 |
-| ScheduledMW ↔ SSH `-p` | 156/156 exact |
-| Duplicate source/target identities | 0 |
-| Validation errors | 0 |
-| PLEXOS dispatch total | 4474.979379 MW |
-| Deterministic SSH SHA-256 | `317C22BFC5A51EF501E9943C63E6CD6D94BC432F4E5B2FF9D04129F04D3DA05B` |
-
-The result table does not contain `212_CSP_1` or `313_STORAGE_1`. The acceptance
-run used explicit `preserve` policy; it did not invent zero MW for them.
-
-## Real ODMS initialization
-
-The internal ODMS worker built the real `RTS-GMLC` case, resolved all 156 Unit
-names, verified all 156 runtime RDF IDs against the approved crosswalk and called
-`SetGeneration()`.
+## Conversion and preflight
 
 | Check | Result |
 |---|---:|
-| Initialized units | 156/156 |
-| Requested total ScheduledMW | 4474.979379000001 MW |
-| ODMS readback total | 4474.979378700256 MW |
-| Maximum per-unit readback error | 0.000012207031261 MW |
-| Acceptance tolerance | 0.0001 MW |
+| Generator crosswalk | 158 approved |
+| Generator setpoints | 156/156 mapped |
+| Load crosswalk/setpoints | 51/51 approved and mapped |
+| Commitment/status rows | 156 class-aware |
+| PLEXOS/ODMS requested generation | 4474.979379 MW |
+| RTS requested load P | 4474.979379 MW |
+| Requested P imbalance | 9.09e-13 MW |
+| ODMS generator readback | 4474.979378700256 MW |
+| ODMS load P readback | 4474.979372024536 MW |
+| ODMS readback P imbalance | 6.68e-6 MW |
+| ODMS load Q readback | 910.697551727295 Mvar |
+| Generator max readback error | 1.221e-5 MW |
+| Readback tolerance | 1e-4 MW |
+
+The absent `212_CSP_1` and `313_STORAGE_1` remain explicit preserve targets.
+The other two ODMS-only machines (`113_DC`, `316_DC`) are audit-only targets.
+All 160 ODMS SynchronousMachine identities are therefore accounted for.
+
+## Commitment policy
+
+- CT/CC/steam/nuclear/hydro: explicit binary `Units Generating` controls status.
+- Wind/PV/RTPV: positive commitment may turn the unit on; zero preserves status.
+- Synchronous condenser: always preserve; zero active commitment never trips it.
+- CSP/storage: preserve pending typed operating semantics.
+
+ODMS requires `Unit.Init()` after `SetDeviceStatus()` to refresh readback from
+case memory. The worker verifies every requested state after that refresh. In
+this snapshot 51 base-case statuses changed.
+
+## Real ODMS PF acceptance
+
+| Check | Result |
+|---|---:|
+| Mismatch distribution | SwingBus (enum 0, before and after) |
+| PF | CONVERGED |
+| System GenerationMW | 4556.037109375 MW |
+| System LoadMW | 4474.9794921875 MW |
+| System LossMW | 81.0573501587 MW |
+| Active balance residual | 0.000267029 MW |
+| Postflight tolerance | 0.001 MW |
+| Largest mismatch | 0.000721191 MVA |
+| Total mismatch | 0.000923740 MVA |
 | SV persisted | No |
 
-The small readback difference is ODMS/PSSO numeric storage precision, not an
-identity or conversion error.
+The correct solved assertion is `GenerationMW ≈ LoadMW + LossMW`, not that
+solved generation remains equal to lossless PLEXOS dispatch. ODMS
+`Unit.PresentMW` does not expose the swing-compensation component in this case;
+`PowerFlowSummary` is therefore the authoritative system-balance source. Six
+priority-0 units at bus 113 identify the swing assignment group.
 
-## PF result and remaining input gap
-
-PF returned `Engine runtime error: 25` and did not converge. The adapter therefore
-did not call `StoreSolutionState()`.
-
-This is an operating-snapshot completeness issue: the supplied files provide
-Generation but not the matching load snapshot or `Units Generating` commitment.
-The ODMS case retains base-case load and status, so its operating balance is not
-the PLEXOS 2020-07-05 00:00 balance. V1 deliberately does not infer commitment
-from nonzero/zero generation and does not scale loads.
-
-Acceptance for a solved snapshot requires the matching PLEXOS interval outputs:
-
-1. Generator `Generation`;
-2. Generator `Units Generating` or an approved status policy;
-3. load active/reactive snapshot, or an approved load forecast mapping;
-4. optional generator Mvar and voltage targets when they are authoritative.
+`StoreSolutionState()` remains disabled in the commissioning run. If requested,
+the worker now requires convergence and the postflight balance gate before it
+can persist SV.

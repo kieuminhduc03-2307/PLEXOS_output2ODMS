@@ -5,7 +5,12 @@
 The authoritative execution path is:
 
 ```text
-PLEXOS Generator.Generation(t) → pssoPy.Unit.ScheduledMW → PF → PresentMW/SV
+OperatingSnapshot(t)
+  → verify all load/unit mRIDs
+  → Load.SetLoad(P,Q)
+  → class-aware Unit.SetDeviceStatus()
+  → Unit.SetGeneration(P,Q)
+  → preflight → PF → PowerFlowSummary/SV
 ```
 
 The interoperability path is:
@@ -37,6 +42,24 @@ the reviewable crosswalk. No mapping is applied until `approved=true`.
 At runtime, `case.GetUnit(target_machine_name).GetRdfID()` must exactly equal the
 approved target mRID before `SetGeneration()` is called.
 
+The RTS load benchmark uses exact source bus + load ID, matching base P/Q and
+target EnergyConsumer mRID. The RTS generator and load builders are benchmark
+profiles only. Generic production conversion consumes externally reviewed,
+approved crosswalks and does not infer identity using RTS naming rules.
+
+## OperatingSnapshot
+
+The typed JSON boundary contains timestamp, generator setpoints, load P/Q,
+unit-status actions, optional voltage/Mvar targets, audit-only units and source
+hashes. Active load comes from the authoritative RTS regional forecast. Reactive
+load uses the explicit `preserve_base_pf` AC embedding policy and carries derived
+provenance.
+
+Commitment is never inferred from `Generation == 0`. Thermal/hydro binary status,
+variable-resource ON-only behavior and synchronous-condenser preserve behavior
+are separate policies. Storage and CSP remain typed preserve resources until
+their charging/discharging contracts are commissioned.
+
 ## Snapshot selection
 
 A snapshot is uniquely selected by phase, period, timestamp, timezone and
@@ -53,10 +76,13 @@ Season/DayType/TimeOfDay schedule schema and does not infer commitment from
 
 ## Transaction boundary
 
-- Build and initialize the case in memory.
-- Read back all `ScheduledMW` values within a configured tolerance.
+- Build the case and verify every identity before the first mutation.
+- Apply load, status and generation layers in deterministic order.
+- Refresh status objects with `Init()` and read back P/Q/status within tolerance.
+- Require balanced preflight and audit `MismatchDistribution=SwingBus`.
 - Solve PF.
-- Collect requested, initialized and solved values separately.
-- Call `StoreSolutionState()` only after convergence and only with explicit user
-  authorization.
+- Use `PowerFlowSummary` for solved generation/load/loss balance; ODMS does not
+  expose swing compensation through `Unit.PresentMW` for this benchmark.
+- Call `StoreSolutionState()` only after convergence, postflight residual gate
+  and explicit user authorization.
 - Close the in-memory case on success or failure.

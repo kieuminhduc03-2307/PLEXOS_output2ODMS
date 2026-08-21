@@ -132,6 +132,18 @@ def _first(entity: dict, property_name: str) -> str:
     return values[0] if values else ""
 
 
+def list_odms_synchronous_machines(path: str | Path) -> list[dict]:
+    entities = _cim_entities(path)
+    result = []
+    for identifier, entity in entities.items():
+        if entity["class"] != "SynchronousMachine":
+            continue
+        name = _first(entity, "IdentifiedObject.name")
+        if name:
+            result.append({"target_machine_name": name, "target_machine_mrid": identifier})
+    return sorted(result, key=lambda item: item["target_machine_name"])
+
+
 def _machine_id(ordinal: int) -> str:
     if 1 <= ordinal <= 9:
         return str(ordinal)

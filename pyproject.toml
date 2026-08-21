@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plexos-output2odms"
-version = "0.1.0"
+version = "0.2.0"
 description = "PLEXOS optimized dispatch to PSS ODMS CIM17 SSH snapshot adapter"
 readme = "README.md"
 requires-python = ">=3.11"
