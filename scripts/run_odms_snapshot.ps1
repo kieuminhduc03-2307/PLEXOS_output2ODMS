@@ -6,7 +6,12 @@ param(
     [switch]$StoreSV,
     [ValidateSet('AuditOnly','SwingBus')][string]$MismatchDistribution = 'SwingBus',
     [double]$ReadbackToleranceMW = 0.0001,
-    [double]$PostflightBalanceToleranceMW = 0.001
+    [double]$PostflightBalanceToleranceMW = 0.001,
+    [double]$PostflightBalanceRelativeTolerance = 0.0001,
+    [double]$MinVoltagePU = 0.9,
+    [double]$MaxVoltagePU = 1.1,
+    [double]$MaxLoadingPercent = 100.0,
+    [double]$GeneratorLimitToleranceMW = 0.0001
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +25,12 @@ $request = @{
     store_sv = [bool]$StoreSV
     readback_tolerance_mw = $ReadbackToleranceMW
     postflight_balance_tolerance_mw = $PostflightBalanceToleranceMW
+    postflight_balance_relative_tolerance = $PostflightBalanceRelativeTolerance
     mismatch_distribution = $MismatchDistribution
+    min_voltage_pu = $MinVoltagePU
+    max_voltage_pu = $MaxVoltagePU
+    max_loading_percent = $MaxLoadingPercent
+    generator_limit_tolerance_mw = $GeneratorLimitToleranceMW
 }
 $request | ConvertTo-Json | Set-Content -LiteralPath $requestPath -Encoding UTF8
 

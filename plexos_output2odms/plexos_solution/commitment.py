@@ -5,25 +5,16 @@ from datetime import datetime
 from pathlib import Path
 
 
-FULL_STATUS_CLASSES = {"CT", "CC", "STEAM", "NUCLEAR", "HYDRO"}
-ON_ONLY_CLASSES = {"PV", "WIND", "RTPV"}
-
-
-def _resource_class(name: str) -> str:
-    if "_SYNC_COND_" in name:
-        return "SYNC_COND"
-    parts = name.split("_")
-    return parts[1].upper() if len(parts) >= 3 else "UNKNOWN"
-
-
 def read_wide_commitment(path: str | Path, timestamp: datetime) -> dict[str, float]:
-    if timestamp.tzinfo is None:
-        raise ValueError("Timestamp must include an explicit timezone")
+    if timestamp.tzinfo is not None:
+        raise ValueError("Commitment selection must use the timezone-naive source wall clock")
     matches: list[dict[str, str]] = []
     with Path(path).open("r", encoding="utf-8-sig", newline="") as stream:
         for row in csv.DictReader(stream):
             value = datetime.fromisoformat(row["time"].strip())
-            if value.replace(tzinfo=timestamp.tzinfo) == timestamp:
+            if value.tzinfo is not None:
+                raise ValueError("Commitment source unexpectedly contains timezone metadata")
+            if value == timestamp:
                 matches.append(row)
     if len(matches) != 1:
         raise ValueError(
@@ -53,25 +44,32 @@ def build_class_aware_statuses(
     result: list[dict] = []
     for source_name, value in sorted(commitment.items()):
         target = targets[source_name]
-        resource_class = _resource_class(source_name)
-        if resource_class in FULL_STATUS_CLASSES:
+        resource_class = target.get("source_operating_class", "")
+        status_policy = target.get("status_policy", "")
+        if not resource_class or not status_policy:
+            raise ValueError(
+                f"Approved crosswalk metadata is missing operating class/status policy for {source_name}"
+            )
+        if status_policy == "BINARY_COMMITMENT":
             action = "set"
             requested = bool(value)
             policy = "authoritative_binary_commitment"
-        elif resource_class in ON_ONLY_CLASSES and value == 1.0:
+        elif status_policy == "COMMITMENT_ON_ONLY" and value == 1.0:
             action = "set"
             requested = True
             policy = "authoritative_commitment_on_only"
-        else:
+        elif status_policy in {"PRESERVE", "COMMITMENT_ON_ONLY"}:
             action = "preserve"
             requested = None
             policy = (
                 "preserve_synchronous_condenser"
-                if resource_class == "SYNC_COND"
+                if resource_class == "SYNCHRONOUS_CONDENSER"
                 else "preserve_zero_variable_resource"
-                if resource_class in ON_ONLY_CLASSES
+                if status_policy == "COMMITMENT_ON_ONLY"
                 else "preserve_uncommissioned_resource_class"
             )
+        else:
+            raise ValueError(f"Unsupported approved status policy {status_policy!r} for {source_name}")
         result.append(
             {
                 "resource_type": "UNIT_STATUS",

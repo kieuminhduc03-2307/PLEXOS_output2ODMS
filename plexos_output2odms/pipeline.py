@@ -19,6 +19,7 @@ from .plexos_solution.dispatch import SolutionSelection
 from .plexos_solution.commitment import build_class_aware_statuses, read_wide_commitment
 from .plexos_solution.reader import read_dispatch
 from .plexos_solution.regional_load import allocate_rts_nodal_load, read_rts_regional_load
+from .time_semantics import SourceTimeContext
 from .validation import ValidationReport
 
 
@@ -31,6 +32,10 @@ class SnapshotConfig:
     bounds_tolerance_mw: float = 1e-6
     missing_dispatch_policy: str = "error"
     preflight_balance_tolerance_mw: float = 1e-6
+    source_time_basis: str = "unknown_local"
+    source_timezone: str | None = None
+    analysis_timezone: str | None = None
+    status_mode: str = "crosswalk_commitment"
 
 
 @dataclass
@@ -94,8 +99,8 @@ class SnapshotResult:
 
     def write_operating_snapshot(self, path: str | Path) -> None:
         payload = {
-            "schema": "plexos-output2odms-operating-snapshot-v1",
-            "timestamp": self.audit["selection"]["timestamp"],
+            "schema": "plexos-output2odms-operating-snapshot-v2",
+            "time": self.audit["selection"]["time"],
             "generator_setpoints": self.rows,
             "load_setpoints": self.load_rows,
             "unit_statuses": self.status_rows,
@@ -150,8 +155,14 @@ def build_dispatch_snapshot(
     commitment_path: str | Path | None = None,
 ) -> SnapshotResult:
     config = config or SnapshotConfig()
-    if timestamp.tzinfo is None:
-        raise ValueError("Timestamp must include an explicit timezone")
+    if timestamp.tzinfo is not None:
+        raise ValueError("Snapshot timestamp must be a timezone-naive source wall clock")
+    time_context = SourceTimeContext(
+        timestamp,
+        source_time_basis=config.source_time_basis,
+        source_timezone=config.source_timezone,
+        analysis_timezone=config.analysis_timezone,
+    )
     solution = Path(solution_path)
     crosswalk_file = Path(crosswalk_path)
     target_cim = Path(target_cim_path)
@@ -222,6 +233,9 @@ def build_dispatch_snapshot(
             {
                 "resource_type": "GENERATOR",
                 "timestamp": record.timestamp.isoformat(),
+                "source_wall_clock": record.timestamp.isoformat(),
+                "source_time_basis": config.source_time_basis,
+                "source_timezone": config.source_timezone,
                 "phase": record.phase,
                 "period": record.period,
                 "sample": record.sample,
@@ -233,6 +247,10 @@ def build_dispatch_snapshot(
                 "target_machine_name": mapping.odms_machine_name,
                 "target_machine_mrid": mapping.odms_synchronous_machine_mrid,
                 "target_generating_unit_mrid": mapping.odms_generating_unit_mrid,
+                "source_resource_type": mapping.source_resource_type,
+                "source_operating_class": mapping.source_operating_class,
+                "status_policy": mapping.status_policy,
+                "target_kind": mapping.target_kind,
                 "scheduled_mw": value,
                 "cim_p_mw": -value,
                 "cim_rotating_machine_p_mw": -value,
@@ -268,6 +286,9 @@ def build_dispatch_snapshot(
             report.error("LOAD_SNAPSHOT_INVALID", str(exc))
         for row in load_rows:
             row["timestamp"] = timestamp.isoformat()
+            row["source_wall_clock"] = timestamp.isoformat()
+            row["source_time_basis"] = config.source_time_basis
+            row["source_timezone"] = config.source_timezone
         report.info(
             "LOAD_Q_POLICY",
             "Load P is allocated from authoritative RTS day-ahead regional demand; Q uses preserve_base_pf and is derived AC embedding, not PLEXOS output.",
@@ -290,7 +311,44 @@ def build_dispatch_snapshot(
         )
 
     status_rows: list[dict] = []
-    if commitment_path is not None:
+    if config.status_mode in {"preserve_odms", "dispatch_on_only"}:
+        status_rows = [
+            {
+                "resource_type": "UNIT_STATUS",
+                "timestamp": row["timestamp"],
+                "source_generator": row["source_generator"],
+                "source_units_generating": None,
+                "resource_class": row["source_operating_class"],
+                "action": (
+                    "set"
+                    if config.status_mode == "dispatch_on_only" and row["generation_mw"] > config.bounds_tolerance_mw
+                    else "preserve"
+                ),
+                "requested_in_service": (
+                    True
+                    if config.status_mode == "dispatch_on_only" and row["generation_mw"] > config.bounds_tolerance_mw
+                    else None
+                ),
+                "policy": (
+                    "explicit_positive_dispatch_on_only"
+                    if config.status_mode == "dispatch_on_only"
+                    else "explicit_run_policy_preserve_odms_status"
+                ),
+                "provenance": "ADAPTER_RUN_POLICY",
+                "target_machine_name": row["target_machine_name"],
+                "target_machine_mrid": row["target_machine_mrid"],
+            }
+            for row in rows
+        ]
+        report.info(
+            "STATUS_RUN_MODE",
+            (
+                "Positive-dispatch units are turned on; zero-dispatch unit status is preserved."
+                if config.status_mode == "dispatch_on_only"
+                else "Optimized P is updated and all ODMS unit statuses are preserved."
+            ),
+        )
+    elif config.status_mode == "crosswalk_commitment" and commitment_path is not None:
         commitment_file = Path(commitment_path)
         try:
             commitment = read_wide_commitment(commitment_file, timestamp)
@@ -301,11 +359,13 @@ def build_dispatch_snapshot(
             "CLASS_AWARE_COMMITMENT",
             "Thermal and hydro use explicit binary commitment; variable resources use ON-only; synchronous condensers are preserved.",
         )
-    else:
+    elif config.status_mode == "crosswalk_commitment":
         report.warning(
             "COMMITMENT_ABSENT",
             "No Units Generating layer was supplied; ODMS base-case unit statuses are preserved.",
         )
+    else:
+        report.error("STATUS_MODE_INVALID", f"Unsupported status mode: {config.status_mode}")
 
     setpoint_mrids = {row["target_machine_mrid"] for row in rows}
     mapped_by_mrid = {item.odms_synchronous_machine_mrid: item for item in mappings}
@@ -355,14 +415,13 @@ def build_dispatch_snapshot(
             "sha256": _sha256(commitment_file),
         }
     audit = {
-        "schema": "plexos-output2odms-audit-v1",
+        "schema": "plexos-output2odms-audit-v2",
         "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "selection": {
             "phase": config.phase,
             "period": config.period,
             "sample": config.sample,
-            "timestamp": timestamp.isoformat(),
-            "timestamp_utc": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "time": time_context.to_dict(),
         },
         "sources": sources,
         "mapping": {
@@ -398,7 +457,7 @@ def build_dispatch_snapshot(
             "status_rows": len(status_rows),
             "set_rows": sum(row["action"] == "set" for row in status_rows),
             "preserved_rows": sum(row["action"] == "preserve" for row in status_rows),
-            "policy": "class-aware-v1" if status_rows else None,
+            "policy": config.status_mode if status_rows else None,
         },
         "audit_units": {
             "count": len(audit_unit_rows),

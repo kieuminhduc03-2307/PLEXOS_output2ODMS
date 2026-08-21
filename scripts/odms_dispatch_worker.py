@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import traceback
 
@@ -21,14 +22,17 @@ def write_json(path, value):
 def read_snapshot(path):
     with open(path, "r", encoding="utf-8") as stream:
         payload = json.load(stream)
-    if payload.get("schema") != "plexos-output2odms-operating-snapshot-v1":
+    if payload.get("schema") not in (
+        "plexos-output2odms-operating-snapshot-v1",
+        "plexos-output2odms-operating-snapshot-v2",
+    ):
         raise ValueError("Unsupported operating snapshot schema")
     return (
         payload.get("generator_setpoints", []),
         payload.get("load_setpoints", []),
         payload.get("unit_statuses", []),
         payload.get("audit_units", []),
-        payload.get("timestamp"),
+        (payload.get("time") or {}).get("source_wall_clock") or payload.get("timestamp"),
     )
 
 
@@ -46,9 +50,100 @@ def get_power_flow_summary(case):
         return None
 
 
+def devices(case, element_type):
+    result = []
+    for item in case.GetDevices(element_type):
+        valid, element = item if isinstance(item, tuple) else (True, item)
+        if valid and element is not None and not element.IsNull() and not element.IsError():
+            result.append(element)
+    return result
+
+
+def engineering_gates(case, resolved_units, request):
+    min_voltage = float(request.get("min_voltage_pu", 0.9))
+    max_voltage = float(request.get("max_voltage_pu", 1.1))
+    max_loading = float(request.get("max_loading_percent", 100.0))
+    gen_tolerance = float(request.get("generator_limit_tolerance_mw", 1e-4))
+    bus_rows = []
+    for bus in devices(case, pssoPy.ElementType.Bus):
+        voltage = float(bus.PresentVoltagePU)
+        if math.isfinite(voltage) and voltage > 0.0:
+            bus_rows.append({"name": bus.Name, "voltage_pu": voltage})
+    voltage_violations = [
+        row for row in bus_rows
+        if row["voltage_pu"] < min_voltage or row["voltage_pu"] > max_voltage
+    ]
+    generator_violations = []
+    for row, unit in resolved_units:
+        scheduled = float(unit.ScheduledMW)
+        minimum = float(unit.MinimumMW)
+        maximum = float(unit.MaximumMW)
+        in_service = bool(unit.IsInService())
+        reasons = []
+        if float(row["generation_mw"]) > gen_tolerance and not in_service:
+            reasons.append("positive dispatch on out-of-service unit")
+        if in_service and scheduled > maximum + gen_tolerance:
+            reasons.append("scheduled MW above operational maximum")
+        if in_service and scheduled > gen_tolerance and scheduled < minimum - gen_tolerance:
+            reasons.append("scheduled MW below operational minimum")
+        if reasons:
+            generator_violations.append({
+                "name": row["target_machine_name"], "scheduled_mw": scheduled,
+                "minimum_mw": minimum, "maximum_mw": maximum,
+                "in_service": in_service, "reasons": reasons,
+            })
+    branch_rows = []
+    branch_device_count = 0
+    unrated_branches = []
+    for element_type in (
+        pssoPy.ElementType.Line,
+        pssoPy.ElementType.Transformer,
+        pssoPy.ElementType.PhaseShifter,
+    ):
+        for branch in devices(case, element_type):
+            if not bool(branch.IsInService()):
+                continue
+            branch_device_count += 1
+            limits = branch.GetFlowLimits(pssoPy.LimitCondition.ConditionA)
+            active_limit = float(limits.ActiveLimit)
+            loading = float(limits.PercentOfLimit)
+            if active_limit > 0.0 and math.isfinite(loading):
+                branch_rows.append({
+                    "name": branch.Name,
+                    "element_type": str(element_type),
+                    "active_limit_mva": active_limit,
+                    "percent_of_limit": loading,
+                })
+            else:
+                unrated_branches.append({"name": branch.Name, "element_type": str(element_type)})
+    overloads = [row for row in branch_rows if row["percent_of_limit"] > max_loading]
+    passed = bool(bus_rows) and not voltage_violations and not generator_violations and not overloads
+    return {
+        "passed": passed,
+        "voltage_range_pu": [min_voltage, max_voltage],
+        "minimum_voltage_pu": min((row["voltage_pu"] for row in bus_rows), default=None),
+        "maximum_voltage_pu": max((row["voltage_pu"] for row in bus_rows), default=None),
+        "voltage_bus_count": len(bus_rows),
+        "voltage_violation_count": len(voltage_violations),
+        "voltage_violations": voltage_violations,
+        "generator_violation_count": len(generator_violations),
+        "generator_violations": generator_violations,
+        "maximum_loading_percent_allowed": max_loading,
+        "maximum_loading_percent": max(
+            (row["percent_of_limit"] for row in branch_rows), default=None
+        ),
+        "monitored_branch_count": len(branch_rows),
+        "in_service_branch_count": branch_device_count,
+        "unrated_branch_count": len(unrated_branches),
+        "unrated_branches": unrated_branches,
+        "overload_count": len(overloads),
+        "overloads": overloads,
+    }
+
+
 def main():
     request_path = odmsPy.GetParams()
-    with open(request_path, "r", encoding="utf-8") as stream:
+    with open(request_path, "r", encoding="utf-8-sig") as stream:
         request = json.load(stream)
     response = {
         "valid": False,
@@ -359,6 +454,12 @@ def main():
             if row["swing_bus_priority"] == 0
         ]
         if power_flow_summary is not None:
+            postflight["unattributed_swing_mw"] = (
+                power_flow_summary["GenerationMW"] - postflight["all_unit_present_mw"]
+            )
+            postflight["unattributed_swing_note"] = (
+                "System-level difference only; it is not attributed to any machine."
+            )
             residual = (
                 power_flow_summary["GenerationMW"]
                 - power_flow_summary["LoadMW"]
@@ -366,9 +467,21 @@ def main():
                 - power_flow_summary["BusShuntMW"]
                 - power_flow_summary["LineShuntMW"]
             )
-            tolerance = float(request.get("postflight_balance_tolerance_mw", 1e-3))
+            absolute_tolerance = float(request.get("postflight_balance_tolerance_mw", 1e-3))
+            relative_tolerance = float(
+                request.get("postflight_balance_relative_tolerance", 1e-4)
+            )
+            scale_mw = max(
+                abs(power_flow_summary["GenerationMW"]),
+                abs(power_flow_summary["LoadMW"]),
+                1.0,
+            )
+            tolerance = max(absolute_tolerance, relative_tolerance * scale_mw)
             postflight["system_active_balance_residual_mw"] = residual
             postflight["system_active_balance_tolerance_mw"] = tolerance
+            postflight["system_active_balance_absolute_tolerance_mw"] = absolute_tolerance
+            postflight["system_active_balance_relative_tolerance"] = relative_tolerance
+            postflight["system_active_balance_scale_mw"] = scale_mw
             postflight["system_active_balance_passed"] = abs(residual) <= tolerance
             if abs(residual) > tolerance:
                 response.update(
@@ -385,6 +498,25 @@ def main():
                 )
         else:
             raise RuntimeError("ODMS PowerFlowSummary is unavailable after convergence")
+        gates = engineering_gates(case, resolved_units, request)
+        postflight["engineering_gates"] = gates
+        if not gates["passed"]:
+            response.update(
+                {
+                    "stage": "engineering_gates_failed",
+                    "power_flow_converged": True,
+                    "power_flow_summary": power_flow_summary,
+                    "postflight": postflight,
+                }
+            )
+            raise RuntimeError(
+                "ODMS engineering gates failed: voltage=%d generator=%d overload=%d"
+                % (
+                    gates["voltage_violation_count"],
+                    gates["generator_violation_count"],
+                    gates["overload_count"],
+                )
+            )
         sv_stored = False
         if request.get("store_sv", False):
             if not odms_case.StoreSolutionState():

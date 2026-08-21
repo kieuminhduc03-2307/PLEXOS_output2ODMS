@@ -49,7 +49,8 @@ approved crosswalks and does not infer identity using RTS naming rules.
 
 ## OperatingSnapshot
 
-The typed JSON boundary contains timestamp, generator setpoints, load P/Q,
+The v2 typed JSON boundary contains source wall-clock/time-basis/timezone and
+analysis-timezone separately, plus generator setpoints, load P/Q,
 unit-status actions, optional voltage/Mvar targets, audit-only units and source
 hashes. Active load comes from the authoritative RTS regional forecast. Reactive
 load uses the explicit `preserve_base_pf` AC embedding policy and carries derived
@@ -62,17 +63,25 @@ their charging/discharging contracts are commissioned.
 
 ## Snapshot selection
 
-A snapshot is uniquely selected by phase, period, timestamp, timezone and
-sample. V1 accepts only `ST / Interval / Generator / Generation` as native ZIP
+A snapshot is uniquely selected by phase, period, source wall clock and
+sample. No timezone is attached to a naive PLEXOS value. `timestamp_utc` exists
+only when source time basis is explicitly known; analysis timezone is a separate
+ODMS embedding choice. The native reader accepts only `ST / Interval / Generator / Generation` as native ZIP
 dispatch. Ambiguous stochastic samples, duplicate timestamps, duplicate targets,
 non-power units, out-of-range values and incomplete mappings fail closed.
 
 ## Time-series policy
 
 PLEXOS remains the authoritative external time-series store. ODMS Network
-Analysis receives one snapshot at a time. V1 does not populate the native
+Analysis receives one snapshot at a time. `run-timeseries` launches a fresh
+ODMS process and calls `BuildCase` for every timestamp, then writes an aggregate
+CSV and hash-bearing manifest. It does not populate the native
 Season/DayType/TimeOfDay schedule schema and does not infer commitment from
 `Generation == 0`.
+
+Runtime modes are `analysis-only` and `sv-store`. `native-schedule` is reserved
+and rejected; `StoreSolutionState()` persists SV and is not represented as a
+native ODMS schedule.
 
 ## Transaction boundary
 
@@ -83,6 +92,10 @@ Season/DayType/TimeOfDay schedule schema and does not infer commitment from
 - Solve PF.
 - Use `PowerFlowSummary` for solved generation/load/loss balance; ODMS does not
   expose swing compensation through `Unit.PresentMW` for this benchmark.
+- Report the difference as system-level `unattributed_swing_mw`; never assign it
+  to a machine without authoritative API evidence.
+- Gate configured bus voltage, generator status/limits, and branch loading when
+  positive ratings are available; explicitly report unrated branches.
 - Call `StoreSolutionState()` only after convergence, postflight residual gate
   and explicit user authorization.
 - Close the in-memory case on success or failure.

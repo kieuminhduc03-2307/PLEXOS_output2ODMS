@@ -30,6 +30,9 @@ class LoadMapping:
     odms_load_mrid: str
     approved: bool
     mapping_basis: str = "exact RTS bus+load ID and base P/Q"
+    source_resource_type: str = "Load"
+    source_operating_class: str = "CONFORMING_LOAD"
+    target_kind: str = "EnergyConsumer"
 
 
 def _rts_load_buses(path: str | Path) -> list[dict]:

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
 from plexos_output2odms.plexos_solution.dispatch import SolutionSelection
-from plexos_output2odms.plexos_solution.reader import inspect_solution, read_dispatch
+from plexos_output2odms.plexos_solution.reader import (
+    inspect_solution,
+    list_solution_timestamps,
+    read_dispatch,
+)
 
 
 def selection(unit: str | None = "MW") -> SolutionSelection:
     return SolutionSelection(
-        "ST", "Interval", datetime(2020, 7, 5, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")), "Mean", unit
+        "ST", "Interval", datetime(2020, 7, 5), "Mean", unit
     )
 
 
@@ -27,6 +30,10 @@ def test_wide_dispatch_extracts_exact_timestamp(tmp_path: Path):
     info = inspect_solution(source)
     assert info["generator_columns"] == 2
     assert info["rows"] == 2
+    assert list_solution_timestamps(source) == [
+        datetime(2020, 7, 5, 0, 0),
+        datetime(2020, 7, 5, 1, 0),
+    ]
 
 
 def test_wide_dispatch_requires_explicit_unit(tmp_path: Path):

@@ -4,7 +4,6 @@ import csv
 import json
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -34,7 +33,7 @@ def test_regional_load_period_one_is_midnight(tmp_path: Path):
         encoding="utf-8",
     )
     values = read_rts_regional_load(
-        path, datetime(2020, 7, 5, 0, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+        path, datetime(2020, 7, 5, 0, 0)
     )
     assert values == {"1": 200.0, "2": 100.0}
 

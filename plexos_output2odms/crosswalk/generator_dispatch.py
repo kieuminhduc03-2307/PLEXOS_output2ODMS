@@ -41,6 +41,22 @@ class GeneratorMapping:
     mapping_basis: str = ""
     min_operating_p_mw: float | None = None
     max_operating_p_mw: float | None = None
+    source_resource_type: str = "Generator"
+    source_operating_class: str = ""
+    status_policy: str = ""
+    target_kind: str = "SynchronousMachine"
+
+
+def _rts_operating_metadata(source_name: str) -> tuple[str, str]:
+    if "_SYNC_COND_" in source_name:
+        return "SYNCHRONOUS_CONDENSER", "PRESERVE"
+    parts = source_name.split("_")
+    resource_class = parts[1].upper() if len(parts) >= 3 else "UNKNOWN"
+    if resource_class in {"CT", "CC", "STEAM", "NUCLEAR", "HYDRO"}:
+        return resource_class, "BINARY_COMMITMENT"
+    if resource_class in {"PV", "WIND", "RTPV"}:
+        return resource_class, "COMMITMENT_ON_ONLY"
+    return resource_class, "PRESERVE"
 
 
 def _model_generators(path: str | Path) -> list[dict]:
@@ -237,6 +253,7 @@ def build_rts_gmlc_crosswalk(
     result: list[GeneratorMapping] = []
     for generator, target, basis in sorted(pairs, key=lambda item: item[0]["name"]):
         name = generator["name"]
+        operating_class, status_policy = _rts_operating_metadata(name)
         bus = generator["node"]
         capacity = generator["max_capacity"]
         target_name, machine_id, machine, unit = target
@@ -258,6 +275,8 @@ def build_rts_gmlc_crosswalk(
                 mapping_basis=basis,
                 min_operating_p_mw=float(minimum) if minimum else None,
                 max_operating_p_mw=float(maximum) if maximum else None,
+                source_operating_class=operating_class,
+                status_policy=status_policy,
             )
         )
     if missing:

@@ -1,7 +1,7 @@
 # PLEXOS Output → PSS ODMS Dispatch Adapter
 
-This repository converts one timestamp from a PLEXOS optimized solution into a
-validated PSS®ODMS operating snapshot. It is deliberately separate from the
+This repository converts one or many timestamps from a PLEXOS optimized solution into
+validated PSS®ODMS operating snapshots. It is deliberately separate from the
 PLEXOS model XML ↔ CIM equipment adapter.
 
 ```text
@@ -29,7 +29,7 @@ PLEXOS Solution / Generation table
 The adapter never writes dispatch to `GeneratingUnit.nominalP`,
 `GeneratingUnit.maxOperatingP`, SQL equipment tables, or directly to SV.
 
-## Supported V1 inputs
+## Supported inputs
 
 - Native PLEXOS Solution ZIP table `ST__Interval__Generators__Generation`
   through the optional `plexosdb` dependency.
@@ -89,7 +89,8 @@ python -m plexos_output2odms build-snapshot `
   "D:\ODMS\tmp\rts_gmlc_odms_compare\odms_cim17\odms_rts_gmlc_cim17.xml" `
   "D:\ODMS\tmp\plexos_output2odms_rts\snapshot_20200705T0000" `
   --timestamp "2020-07-05T00:00:00" `
-  --timezone "Asia/Ho_Chi_Minh" `
+  --source-time-basis unknown_local `
+  --analysis-timezone UTC `
   --unit MW `
   --missing-dispatch preserve `
   --regional-load "D:\...\Load\DAY_AHEAD_regional_Load.csv" `
@@ -111,6 +112,38 @@ Outputs:
 `212_CSP_1` and `313_STORAGE_1` are absent, so their existing ODMS scheduled
 values are left unchanged rather than silently set to zero.
 
+PLEXOS timestamps in the RTS text exports are timezone-naive. The adapter keeps
+`source_wall_clock`, `source_time_basis`, `source_timezone`, and
+`analysis_timezone` separate. With `unknown_local`, `timestamp_utc` remains
+null; an analysis timezone is only an ODMS embedding choice and is not claimed
+as source metadata.
+
+Run a 24-hour independent commissioning window:
+
+```powershell
+python -m plexos_output2odms run-timeseries `
+  "D:\...\PLEXOS_DA_solution_generation.txt" `
+  "D:\...\generator_crosswalk.json" `
+  "D:\...\odms_rts_gmlc_cim17.xml" `
+  "D:\...\DAY_AHEAD_regional_Load.csv" `
+  "D:\...\load_crosswalk.json" `
+  "D:\...\PLEXOS_DA_solution_commitment_allTX.csv" `
+  "D:\...\commissioning_24h" `
+  --start 2020-07-05T00:00:00 --hours 24 --unit MW `
+  --analysis-timezone UTC --mode analysis-only
+```
+
+Add `--status-mode crosswalk_commitment` to apply the reviewed commitment
+policies. `dispatch_on_only` turns on positive-dispatch units and preserves zero
+units; `preserve_odms` leaves every status unchanged. All modes are explicit in
+the snapshot audit.
+
+Every timestamp launches a fresh `ODMS.exe` process and calls `BuildCase`, so
+state cannot leak between hours. Outputs include `timeseries_result.csv` and
+`run_manifest.json`. Modes are `analysis-only` and `sv-store`;
+`native-schedule` is explicitly rejected until a real ODMS schedule API is
+implemented. `StoreSolutionState()` is SV persistence, not a native schedule.
+
 ## Run inside ODMS
 
 The direct integration sets `pssoPy.Unit.ScheduledMW`, reads it back, solves PF,
@@ -125,10 +158,14 @@ scripts\run_odms_snapshot.ps1 `
 ```
 
 The launcher enforces/audits `MismatchDistribution=SwingBus` by default. It
-requires PF convergence and a system balance residual within `0.001 MW` before
-`StoreSolutionState()` is allowed. `PowerFlowSummary.GenerationMW` is the
+requires PF convergence and a system balance residual within the greater of
+`0.001 MW` or `0.01%` of system scale (to accommodate ODMS float32 summaries) before
+`StoreSolutionState()` is allowed. Configurable engineering gates check bus
+voltage, generator status/operating limits, and rated branch/transformer loading.
+`PowerFlowSummary.GenerationMW` is the
 authoritative solved total because ODMS `Unit.PresentMW` does not expose the
-swing-compensation component in this case.
+swing-compensation component in this case. The adapter reports the system-level
+difference as `unattributed_swing_mw` and never assigns it to an individual unit.
 
 The ODMS 14.2 installation links Python 3.13; the launcher temporarily prepends
 the local Python 3.13 runtime to `PATH` for the child process.

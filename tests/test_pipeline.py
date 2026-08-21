@@ -5,7 +5,6 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from plexos_output2odms.crosswalk.generator_dispatch import GeneratorMapping, write_crosswalk
 from plexos_output2odms.pipeline import SnapshotConfig, build_dispatch_snapshot, write_snapshot_outputs
@@ -38,13 +37,13 @@ def prepare(tmp_path: Path, mappings: list[GeneratorMapping]):
 
 def test_snapshot_maps_scheduled_mw_and_negative_cim_p(tmp_path: Path):
     solution, target, crosswalk = prepare(tmp_path, [mapping("G1", "machine-1")])
-    timestamp = datetime(2020, 7, 5, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+    timestamp = datetime(2020, 7, 5)
     result = build_dispatch_snapshot(
         solution,
         crosswalk,
         target,
         timestamp=timestamp,
-        config=SnapshotConfig(unit="MW"),
+        config=SnapshotConfig(unit="MW", analysis_timezone="Asia/Ho_Chi_Minh"),
         dependent_on="urn:uuid:eq-model",
     )
     assert result.report.ok
@@ -64,7 +63,7 @@ def test_unapproved_crosswalk_fails_closed(tmp_path: Path):
         solution,
         crosswalk,
         target,
-        timestamp=datetime(2020, 7, 5, tzinfo=ZoneInfo("UTC")),
+        timestamp=datetime(2020, 7, 5),
         config=SnapshotConfig(unit="MW"),
     )
     assert not result.report.ok
@@ -75,7 +74,7 @@ def test_missing_dispatch_requires_explicit_preserve(tmp_path: Path):
     solution, target, crosswalk = prepare(
         tmp_path, [mapping("G1", "machine-1"), mapping("G2", "machine-2")]
     )
-    timestamp = datetime(2020, 7, 5, tzinfo=ZoneInfo("UTC"))
+    timestamp = datetime(2020, 7, 5)
     failed = build_dispatch_snapshot(
         solution, crosswalk, target, timestamp=timestamp, config=SnapshotConfig(unit="MW")
     )

@@ -9,8 +9,8 @@ from ..crosswalk.load_snapshot import LoadMapping
 
 def read_rts_regional_load(path: str | Path, timestamp: datetime) -> dict[str, float]:
     """Read one RTS day-ahead row; Period 1 is the interval beginning at 00:00."""
-    if timestamp.tzinfo is None:
-        raise ValueError("Timestamp must include an explicit timezone")
+    if timestamp.tzinfo is not None:
+        raise ValueError("Regional-load selection must use the timezone-naive source wall clock")
     expected_period = timestamp.hour + 1
     matches: list[dict[str, str]] = []
     with Path(path).open("r", encoding="utf-8-sig", newline="") as stream:

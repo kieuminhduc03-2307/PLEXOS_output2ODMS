@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 from plexos_output2odms.plexos_solution.commitment import build_class_aware_statuses
+import pytest
 
 
 def generator(name: str) -> dict:
+    resource_class = name.split("_")[1]
+    policy = (
+        "PRESERVE" if resource_class == "SYNC" else
+        "COMMITMENT_ON_ONLY" if resource_class == "WIND" else
+        "BINARY_COMMITMENT"
+    )
     return {
-        "timestamp": "2020-07-05T00:00:00+07:00",
+        "timestamp": "2020-07-05T00:00:00",
         "source_generator": name,
         "target_machine_name": name,
         "target_machine_mrid": "mrid-" + name,
+        "source_operating_class": (
+            "SYNCHRONOUS_CONDENSER" if "SYNC_COND" in name else resource_class
+        ),
+        "status_policy": policy,
     }
 
 
@@ -31,3 +42,10 @@ def test_positive_variable_commitment_can_only_turn_on():
     )[0]
     assert row["action"] == "set"
     assert row["requested_in_service"] is True
+
+
+def test_runtime_refuses_to_infer_status_policy_from_name():
+    row = generator("101_CT_1")
+    row.pop("status_policy")
+    with pytest.raises(ValueError, match="crosswalk metadata"):
+        build_class_aware_statuses({"101_CT_1": 1.0}, [row])

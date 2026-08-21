@@ -6,20 +6,14 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from .crosswalk.generator_dispatch import build_rts_gmlc_crosswalk, write_crosswalk
 from .crosswalk.load_snapshot import build_rts_gmlc_load_crosswalk, write_load_crosswalk
 from .odms.runtime import apply_dispatch_and_solve
 from .pipeline import SnapshotConfig, build_dispatch_snapshot, write_snapshot_outputs
 from .plexos_solution.reader import inspect_solution
-
-
-def _timestamp(value: str, timezone_name: str) -> datetime:
-    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if result.tzinfo is None:
-        result = result.replace(tzinfo=ZoneInfo(timezone_name))
-    return result
+from .time_semantics import SourceTimeContext, parse_source_wall_clock
+from .timeseries import TimeSeriesConfig, run_timeseries
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -54,7 +48,19 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("target_cim", type=Path)
     snapshot.add_argument("output_directory", type=Path)
     snapshot.add_argument("--timestamp", required=True)
-    snapshot.add_argument("--timezone", required=True, help="IANA timezone for timestamps without an offset")
+    snapshot.add_argument(
+        "--source-time-basis",
+        choices=["unknown_local", "utc", "iana_timezone"],
+        default="unknown_local",
+    )
+    snapshot.add_argument("--source-timezone", default=None)
+    snapshot.add_argument(
+        "--analysis-timezone",
+        "--timezone",
+        dest="analysis_timezone",
+        required=True,
+        help="IANA timezone used only for ODMS analysis embedding; does not assert source timezone",
+    )
     snapshot.add_argument("--phase", default="ST")
     snapshot.add_argument("--period", default="Interval")
     snapshot.add_argument("--sample", default="Mean")
@@ -63,6 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--regional-load", type=Path, default=None)
     snapshot.add_argument("--load-crosswalk", type=Path, default=None)
     snapshot.add_argument("--commitment", type=Path, default=None)
+    snapshot.add_argument("--status-mode", choices=["crosswalk_commitment", "dispatch_on_only", "preserve_odms"], default="crosswalk_commitment")
     snapshot.add_argument("--balance-tolerance-mw", type=float, default=1e-6)
     snapshot.add_argument(
         "--missing-dispatch",
@@ -77,6 +84,36 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=["direct", "ssh"], default="direct")
     run.add_argument("--ssh", type=Path, default=None)
     run.add_argument("--store-sv", action="store_true", help="Persist solved SV only after convergence")
+
+    series = commands.add_parser(
+        "run-timeseries", help="Build and solve independent ODMS cases for a PLEXOS time window"
+    )
+    series.add_argument("solution", type=Path)
+    series.add_argument("crosswalk", type=Path)
+    series.add_argument("target_cim", type=Path)
+    series.add_argument("regional_load", type=Path)
+    series.add_argument("load_crosswalk", type=Path)
+    series.add_argument("commitment", type=Path)
+    series.add_argument("output_directory", type=Path)
+    series.add_argument("--start", default=None)
+    series.add_argument("--hours", type=int, default=None)
+    series.add_argument("--unit", default="MW")
+    series.add_argument("--source-time-basis", choices=["unknown_local", "utc", "iana_timezone"], default="unknown_local")
+    series.add_argument("--source-timezone", default=None)
+    series.add_argument("--analysis-timezone", required=True)
+    series.add_argument("--mode", choices=["analysis-only", "sv-store", "native-schedule"], default="analysis-only")
+    series.add_argument("--status-mode", choices=["crosswalk_commitment", "dispatch_on_only", "preserve_odms"], default="crosswalk_commitment")
+    series.add_argument("--server", default=r".\SQLEXPRESS")
+    series.add_argument("--model", default="RTS-GMLC")
+    series.add_argument("--build-only", action="store_true")
+    series.add_argument("--balance-tolerance-mw", type=float, default=1e-6)
+    series.add_argument(
+        "--missing-dispatch", choices=["error", "preserve"], default="preserve",
+        help="Preserve approved resources absent from dispatch (RTS CSP/storage are deferred)",
+    )
+    series.add_argument("--min-voltage-pu", type=float, default=0.9)
+    series.add_argument("--max-voltage-pu", type=float, default=1.1)
+    series.add_argument("--max-loading-percent", type=float, default=100.0)
     return parser
 
 
@@ -104,7 +141,10 @@ def _read_operating_snapshot(
     if path.suffix.lower() == ".csv":
         return _read_normalized(path), [], [], []
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema") != "plexos-output2odms-operating-snapshot-v1":
+    if payload.get("schema") not in {
+        "plexos-output2odms-operating-snapshot-v1",
+        "plexos-output2odms-operating-snapshot-v2",
+    }:
         raise ValueError("Unsupported operating snapshot schema")
     generators = payload.get("generator_setpoints", [])
     loads = payload.get("load_setpoints", [])
@@ -150,7 +190,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Mappings:       {len(mappings)} ({'approved' if args.approve else 'review required'})")
             return 0
         if args.command == "build-snapshot":
-            timestamp = _timestamp(args.timestamp, args.timezone)
+            timestamp = parse_source_wall_clock(args.timestamp)
+            time_context = SourceTimeContext(
+                timestamp,
+                source_time_basis=args.source_time_basis,
+                source_timezone=args.source_timezone,
+                analysis_timezone=args.analysis_timezone,
+            )
             result = build_dispatch_snapshot(
                 args.solution,
                 args.crosswalk,
@@ -163,13 +209,21 @@ def main(argv: list[str] | None = None) -> int:
                     unit=args.unit,
                     missing_dispatch_policy=args.missing_dispatch,
                     preflight_balance_tolerance_mw=args.balance_tolerance_mw,
+                    source_time_basis=args.source_time_basis,
+                    source_timezone=args.source_timezone,
+                    analysis_timezone=args.analysis_timezone,
+                    status_mode=args.status_mode,
                 ),
                 dependent_on=args.dependent_on,
                 regional_load_path=args.regional_load,
                 load_crosswalk_path=args.load_crosswalk,
                 commitment_path=args.commitment,
             )
-            outputs = write_snapshot_outputs(result, args.output_directory, scenario_time=timestamp)
+            outputs = write_snapshot_outputs(
+                result,
+                args.output_directory,
+                scenario_time=time_context.analysis_aware,
+            )
             print(result.report.format_text())
             print(json.dumps(outputs, indent=2))
             return 0 if result.report.ok else 2
@@ -202,6 +256,53 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Power flow converged: {result.converged}")
             print(f"Result: {args.result_json}")
             return 0
+        if args.command == "run-timeseries":
+            start = parse_source_wall_clock(args.start) if args.start else None
+            snapshot_config = SnapshotConfig(
+                unit=args.unit,
+                missing_dispatch_policy=args.missing_dispatch,
+                preflight_balance_tolerance_mw=args.balance_tolerance_mw,
+                source_time_basis=args.source_time_basis,
+                source_timezone=args.source_timezone,
+                analysis_timezone=args.analysis_timezone,
+                status_mode=args.status_mode,
+            )
+            manifest = run_timeseries(
+                args.solution,
+                args.crosswalk,
+                args.target_cim,
+                args.output_directory,
+                regional_load=args.regional_load,
+                load_crosswalk=args.load_crosswalk,
+                commitment=args.commitment,
+                config=TimeSeriesConfig(
+                    snapshot=snapshot_config,
+                    mode=args.mode,
+                    server=args.server,
+                    model=args.model,
+                    start=start,
+                    hours=args.hours,
+                    build_only=args.build_only,
+                    min_voltage_pu=args.min_voltage_pu,
+                    max_voltage_pu=args.max_voltage_pu,
+                    max_loading_percent=args.max_loading_percent,
+                ),
+            )
+            print(
+                json.dumps(
+                    {
+                        "mode": manifest["mode"],
+                        "requested_timestamp_count": manifest["requested_timestamp_count"],
+                        "completed_timestamp_count": manifest["completed_timestamp_count"],
+                        "valid_timestamp_count": manifest["valid_timestamp_count"],
+                        "all_valid": manifest["all_valid"],
+                        "run_manifest": str((args.output_directory / "run_manifest.json").resolve()),
+                        "timeseries_result": str((args.output_directory / "timeseries_result.csv").resolve()),
+                    },
+                    indent=2,
+                )
+            )
+            return 0 if manifest["all_valid"] or args.build_only else 2
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

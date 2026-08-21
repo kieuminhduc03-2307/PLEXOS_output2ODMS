@@ -29,10 +29,10 @@ def _parse_datetime(value: str) -> datetime:
 
 
 def _same_time(actual: datetime, selected: datetime) -> bool:
-    if actual.tzinfo is None and selected.tzinfo is not None:
-        actual = actual.replace(tzinfo=selected.tzinfo)
-    if selected.tzinfo is None and actual.tzinfo is not None:
-        selected = selected.replace(tzinfo=actual.tzinfo)
+    if (actual.tzinfo is None) != (selected.tzinfo is None):
+        raise ValueError(
+            "Source and selection timestamp timezone metadata differ; implicit timezone attachment is prohibited"
+        )
     return actual == selected
 
 
@@ -72,8 +72,6 @@ def _read_csv(path: Path, selection: SolutionSelection) -> list[DispatchRecord]:
                 if matched_timestamp:
                     raise ValueError(f"Duplicate dispatch timestamp: {row['time']}")
                 matched_timestamp = True
-                if timestamp.tzinfo is None:
-                    timestamp = timestamp.replace(tzinfo=selection.timestamp.tzinfo)
                 for name in fields:
                     if name == "time":
                         continue
@@ -113,8 +111,6 @@ def _read_csv(path: Path, selection: SolutionSelection) -> list[DispatchRecord]:
             timestamp = _parse_datetime(row["_date"])
             if not _same_time(timestamp, selection.timestamp):
                 continue
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=selection.timestamp.tzinfo)
             rows.append(
                 DispatchRecord(
                     timestamp,
@@ -212,8 +208,6 @@ def _read_solution_zip(path: Path, selection: SolutionSelection) -> list[Dispatc
             timestamp = selected_local
             if band != 1:
                 raise ValueError(f"Generation has unsupported band {band} for object {object_id}")
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=selection.timestamp.tzinfo)
             rows.append(
                 DispatchRecord(
                     timestamp,
@@ -248,6 +242,25 @@ def read_dispatch(path: str | Path, selection: SolutionSelection) -> list[Dispat
         duplicates = sorted({name for name in names if names.count(name) > 1})
         raise ValueError(f"Duplicate Generator dispatch rows: {duplicates[:20]}")
     return sorted(records, key=lambda item: item.generator_name)
+
+
+def list_solution_timestamps(path: str | Path) -> list[datetime]:
+    """List exact source wall-clock timestamps without inventing timezone metadata."""
+    source = Path(path)
+    if source.suffix.casefold() == ".zip":
+        raise ValueError("Time-series timestamp discovery for native Solution ZIP is not implemented")
+    with source.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fields = reader.fieldnames or []
+        time_field = "time" if "time" in fields else "_date" if "_date" in fields else None
+        if time_field is None:
+            raise ValueError("PLEXOS result has no time/_date column")
+        values = {_parse_datetime(row[time_field]) for row in reader if row.get(time_field)}
+    if any(value.tzinfo is not None for value in values):
+        raise ValueError("Source carries timezone metadata; explicit aware-source support is required")
+    if not values:
+        raise ValueError("PLEXOS result contains no timestamps")
+    return sorted(values)
 
 
 def inspect_solution(path: str | Path) -> dict:
