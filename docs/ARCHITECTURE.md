@@ -47,12 +47,31 @@ target EnergyConsumer mRID. The RTS generator and load builders are benchmark
 profiles only. Generic production conversion consumes externally reviewed,
 approved crosswalks and does not infer identity using RTS naming rules.
 
+## Static AC contract
+
+The RTS `gen.csv` contract is joined to the approved generator identity:
+
+- `Qmin`/`Qmax` are applied and read back for every mapped machine.
+- `V Setpoint p.u.` is applied only to ODMS units that already regulate voltage.
+- `MW Inj` and `MVAR Inj` calibrate the base case only. `MVAR Inj` is never
+  treated as a PLEXOS Q(t) series; ODMS solves reactive output.
+- committed-off thermal units remain off even when that makes PF difficult.
+
+The adapter preserves the base-case transformer control mode and fixed shunt
+state. It audits both on every run and does not automatically retap transformers
+or switch shunts. Reactive load continues to use the explicit
+`preserve_base_pf` policy.
+
+The branch contract maps official RTS `Cont`, `LTE`, and `STE` to ODMS
+Condition A, B, and C. All three are applied and read back before PF. Parallel
+devices that cannot be identified uniquely fail closed.
+
 ## OperatingSnapshot
 
-The v2 typed JSON boundary contains source wall-clock/time-basis/timezone and
+The v3 typed JSON boundary contains source wall-clock/time-basis/timezone and
 analysis-timezone separately, plus generator setpoints, load P/Q,
-unit-status actions, optional voltage/Mvar targets, audit-only units and source
-hashes. Active load comes from the authoritative RTS regional forecast. Reactive
+unit-status actions, static Q/voltage controls, branch ratings, audit-only units
+and source hashes. Active load comes from the authoritative RTS regional forecast. Reactive
 load uses the explicit `preserve_base_pf` AC embedding policy and carries derived
 provenance.
 
@@ -99,3 +118,14 @@ native ODMS schedule.
 - Call `StoreSolutionState()` only after convergence, postflight residual gate
   and explicit user authorization.
 - Close the in-memory case on success or failure.
+
+## Outcome taxonomy
+
+`adapter_valid` means identity, source completeness, requested mutations and
+readback succeeded. `ac_valid` means the solved operating point also passed all
+configured AC gates. Primary classes include `ADAPTER_VALID_AC_VALID`,
+`ADAPTER_VALID_AC_VOLTAGE_VIOLATION`, `ADAPTER_VALID_AC_OVERLOAD`,
+`ADAPTER_VALID_AC_NONCONVERGED`, and `ADAPTER_VALID_ACCOUNTING_RESIDUAL`.
+Independent `outcome_flags` retain overlapping violations. Missing controls,
+limits, or mappings are instead classified as `INPUT_CONTROL_DATA_MISSING`,
+`LIMIT_DATA_MISSING`, or `MAPPING_INVALID`.

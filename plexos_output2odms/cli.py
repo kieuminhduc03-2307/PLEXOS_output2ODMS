@@ -9,11 +9,13 @@ from pathlib import Path
 
 from .crosswalk.generator_dispatch import build_rts_gmlc_crosswalk, write_crosswalk
 from .crosswalk.load_snapshot import build_rts_gmlc_load_crosswalk, write_load_crosswalk
+from .crosswalk.branch_ratings import build_rts_branch_rating_crosswalk, write_branch_rating_crosswalk
 from .odms.runtime import apply_dispatch_and_solve
 from .pipeline import SnapshotConfig, build_dispatch_snapshot, write_snapshot_outputs
 from .plexos_solution.reader import inspect_solution
 from .time_semantics import SourceTimeContext, parse_source_wall_clock
 from .timeseries import TimeSeriesConfig, run_timeseries
+from .base_calibration import calibrate_rts_base_ac
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     crosswalk.add_argument("output", type=Path)
     crosswalk.add_argument("--profile", choices=["rts-gmlc"], default="rts-gmlc")
     crosswalk.add_argument("--approve", action="store_true", help="Explicitly approve generated exact mappings")
+    crosswalk.add_argument("--generator-data", type=Path, default=None, help="RTS SourceData/gen.csv AC capability contract")
 
     load_crosswalk = commands.add_parser(
         "build-load-crosswalk", help="Build an exact RTS-GMLC bus-load-to-ODMS mapping"
@@ -41,6 +44,24 @@ def _parser() -> argparse.ArgumentParser:
     load_crosswalk.add_argument("output", type=Path)
     load_crosswalk.add_argument("--profile", choices=["rts-gmlc"], default="rts-gmlc")
     load_crosswalk.add_argument("--approve", action="store_true")
+
+    branch_crosswalk = commands.add_parser(
+        "build-branch-crosswalk", help="Build RTS branch rating-to-ODMS Condition A/B/C mapping"
+    )
+    branch_crosswalk.add_argument("branch_data", type=Path)
+    branch_crosswalk.add_argument("odms_ac_audit", type=Path)
+    branch_crosswalk.add_argument("output", type=Path)
+    branch_crosswalk.add_argument("--raw-reference", type=Path, default=None)
+    branch_crosswalk.add_argument("--approve", action="store_true")
+
+    calibration = commands.add_parser("calibrate-base-ac", help="Compare official RTS base AC data with a real ODMS base-case audit")
+    calibration.add_argument("generator_data", type=Path)
+    calibration.add_argument("bus_data", type=Path)
+    calibration.add_argument("generator_crosswalk", type=Path)
+    calibration.add_argument("load_crosswalk", type=Path)
+    calibration.add_argument("branch_crosswalk", type=Path)
+    calibration.add_argument("odms_ac_audit", type=Path)
+    calibration.add_argument("output", type=Path)
 
     snapshot = commands.add_parser("build-snapshot", help="Build one validated dispatch snapshot")
     snapshot.add_argument("solution", type=Path)
@@ -69,6 +90,7 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--regional-load", type=Path, default=None)
     snapshot.add_argument("--load-crosswalk", type=Path, default=None)
     snapshot.add_argument("--commitment", type=Path, default=None)
+    snapshot.add_argument("--branch-crosswalk", type=Path, default=None)
     snapshot.add_argument("--status-mode", choices=["crosswalk_commitment", "dispatch_on_only", "preserve_odms"], default="crosswalk_commitment")
     snapshot.add_argument("--balance-tolerance-mw", type=float, default=1e-6)
     snapshot.add_argument(
@@ -114,6 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     series.add_argument("--min-voltage-pu", type=float, default=0.9)
     series.add_argument("--max-voltage-pu", type=float, default=1.1)
     series.add_argument("--max-loading-percent", type=float, default=100.0)
+    series.add_argument("--branch-crosswalk", type=Path, default=None)
     return parser
 
 
@@ -144,6 +167,7 @@ def _read_operating_snapshot(
     if payload.get("schema") not in {
         "plexos-output2odms-operating-snapshot-v1",
         "plexos-output2odms-operating-snapshot-v2",
+        "plexos-output2odms-operating-snapshot-v3",
     }:
         raise ValueError("Unsupported operating snapshot schema")
     generators = payload.get("generator_setpoints", [])
@@ -163,7 +187,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "build-crosswalk":
             mappings = build_rts_gmlc_crosswalk(
-                args.plexos_model, args.odms_cim, approved=args.approve
+                args.plexos_model,
+                args.odms_cim,
+                approved=args.approve,
+                generator_data=args.generator_data,
             )
             args.output.parent.mkdir(parents=True, exist_ok=True)
             write_crosswalk(
@@ -171,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
                 source_model=str(args.plexos_model.resolve()),
                 target_cim=str(args.odms_cim.resolve()),
+                generator_data=str(args.generator_data.resolve()) if args.generator_data else None,
             )
             print(f"Crosswalk: {args.output}")
             print(f"Mappings:  {len(mappings)} ({'approved' if args.approve else 'review required'})")
@@ -189,6 +217,36 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Load crosswalk: {args.output}")
             print(f"Mappings:       {len(mappings)} ({'approved' if args.approve else 'review required'})")
             return 0
+        if args.command == "build-branch-crosswalk":
+            mappings = build_rts_branch_rating_crosswalk(
+                args.branch_data, args.odms_ac_audit, approved=args.approve
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            write_branch_rating_crosswalk(
+                mappings,
+                args.output,
+                source_branch_data=str(args.branch_data.resolve()),
+                odms_ac_audit=str(args.odms_ac_audit.resolve()),
+                raw_reference=str(args.raw_reference.resolve()) if args.raw_reference else None,
+            )
+            print(f"Branch rating crosswalk: {args.output}")
+            print(f"Mappings: {len(mappings)} ({'approved' if args.approve else 'review required'})")
+            return 0
+        if args.command == "calibrate-base-ac":
+            report = calibrate_rts_base_ac(
+                args.generator_data,
+                args.bus_data,
+                args.generator_crosswalk,
+                args.load_crosswalk,
+                args.branch_crosswalk,
+                args.odms_ac_audit,
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            print(json.dumps(report["summary"], indent=2))
+            print(f"Contract passed: {report['contract_passed']}")
+            print(f"Report: {args.output}")
+            return 0 if report["contract_passed"] else 2
         if args.command == "build-snapshot":
             timestamp = parse_source_wall_clock(args.timestamp)
             time_context = SourceTimeContext(
@@ -218,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                 regional_load_path=args.regional_load,
                 load_crosswalk_path=args.load_crosswalk,
                 commitment_path=args.commitment,
+                branch_crosswalk_path=args.branch_crosswalk,
             )
             outputs = write_snapshot_outputs(
                 result,
@@ -275,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
                 regional_load=args.regional_load,
                 load_crosswalk=args.load_crosswalk,
                 commitment=args.commitment,
+                branch_crosswalk=args.branch_crosswalk,
                 config=TimeSeriesConfig(
                     snapshot=snapshot_config,
                     mode=args.mode,
@@ -295,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
                         "requested_timestamp_count": manifest["requested_timestamp_count"],
                         "completed_timestamp_count": manifest["completed_timestamp_count"],
                         "valid_timestamp_count": manifest["valid_timestamp_count"],
+                        "adapter_valid_timestamp_count": manifest["adapter_valid_timestamp_count"],
+                        "outcome_counts": manifest["outcome_counts"],
                         "all_valid": manifest["all_valid"],
                         "run_manifest": str((args.output_directory / "run_manifest.json").resolve()),
                         "timeseries_result": str((args.output_directory / "timeseries_result.csv").resolve()),

@@ -71,7 +71,43 @@ priority-0 units at bus 113 identify the swing assignment group.
 the worker now requires convergence and the postflight balance gate before it
 can persist SV.
 
-## V0.3 336-hour commissioning
+## V0.4 base AC calibration
+
+The real ODMS base case was audited read-only, then compared with official RTS
+`gen.csv`, `bus.csv`, and `branch.csv` before any time-series run.
+
+| Check | Result |
+|---|---:|
+| ODMS buses / loads / units / branches | 73 / 51 / 160 / 120 |
+| Official generators mapped | 158/158 |
+| ODMS regulating / non-regulating mapped units | 97 / 61 |
+| Qmin/Qmax mismatches | 0 |
+| Maximum base ScheduledMW error | 1.221e-6 MW |
+| Maximum base ScheduledMvar reference error | 4.883e-6 Mvar |
+| Maximum regulating voltage-target error | 0.004583 kV |
+| Official loads mapped, P/Q mismatches | 51/51, 0 |
+| Official branches mapped | 120/120 |
+| Transformer controls | 15 fixed-voltage, tap changing disabled |
+| Fixed shunt banks / SVCs | 3 / 0 |
+
+`MVAR Inj` is used only to prove the ODMS base-case calibration; it is not Q(t).
+PLEXOS remains authoritative for P(t) and commitment, while ODMS solves Q.
+Voltage targets come from generator `V Setpoint p.u.` and are applied only to
+the 97 ODMS regulating units. Transformer and shunt states are audited and
+preserved rather than automatically manipulated.
+
+The largest solved-voltage difference from `bus.csv` is 0.087954 pu. This is an
+input-solution distinction, not an identity mismatch: at buses such as 207 and
+307, generator setpoints (0.9699 and 0.9568 pu) differ materially from the
+voltages recorded in `bus.csv`; the ODMS controls agree with `gen.csv`.
+
+All 120 official branches map exactly by terminal buses and electrical
+parameters. The reviewed rating contract is `Cont → ConditionA`,
+`LTE → ConditionB`, `STE → ConditionC`. The same-case RAW file verifies the
+continuous rating but stores RATEA/B/C identically; reviewed `branch.csv` is
+therefore authoritative for distinct emergency ratings.
+
+## V0.4 commissioning
 
 Every timestamp from `2020-07-05 00:00` through `2020-07-18 23:00` was run in a
 fresh hidden `ODMS.exe` process with a fresh `BuildCase`. Mode was
@@ -83,30 +119,40 @@ fresh hidden `ODMS.exe` process with a fresh `BuildCase`. Mode was
 | Independent snapshots built | 336/336 |
 | Identity/readback mapping failures | 0 |
 | PF converged | 316/336 |
-| Passed all gates | 79/336 |
+| Adapter-valid snapshots | 336/336 |
+| AC-valid snapshots | 44/336 |
 | Voltage-gate failures | 233 |
 | Balance-gate failures after convergence | 4 |
 | PF non-convergence | 20 |
 | Generator-limit/status violation hours | 0 |
-| Rated-branch overload hours | 0 |
+| Rated-branch overload hours | 167 |
 | Maximum generator readback error | 3.025e-5 MW |
-| Maximum absolute system residual | 1.1096 MW |
+| Maximum absolute residual in the four failed balance gates | 1.1096 MW |
 | Solved voltage range (312 gated hours) | 0.70215–1.17382 pu |
-| In-service branches discovered | 120 |
-| Branches with usable Condition-A rating | 0 |
+| Maximum branch loading | 111.337% |
+| Rated branches after readback | 120 |
+| Missing mapping/control/limit data | 0 |
 
-All 120 in-service branch devices were returned by the ODMS API, but this
-imported case exposes no positive Condition-A limits. The adapter therefore
-reports 120 unrated branches rather than claiming an overload pass from absent
-ratings.
+Primary outcome classes are 44 `ADAPTER_VALID_AC_VALID`, 167
+`ADAPTER_VALID_AC_OVERLOAD`, 101 `ADAPTER_VALID_AC_VOLTAGE_VIOLATION`, 20
+`ADAPTER_VALID_AC_NONCONVERGED`, and 4
+`ADAPTER_VALID_ACCOUNTING_RESIDUAL`. Because voltage and overload can occur
+together, independent flags report 233 voltage-violation hours and 167 overload
+hours. No tolerance was widened to force a pass.
+
+The four accounting residuals occur at `2020-07-09 10:00` (-0.817413 MW),
+`2020-07-09 14:00` (-0.873947 MW), `2020-07-10 11:00` (-1.109512 MW), and
+`2020-07-16 10:00` (-1.074280 MW). They are now a separate deterministic
+classification rather than being conflated with mapping or PF convergence.
 
 The remaining AC failures are not converter identity errors. The available
-PLEXOS output supplies active dispatch and commitment, but no reactive dispatch
-or voltage targets. The current explicit AC embedding derives load Q with
-`preserve_base_pf`; it cannot guarantee an acceptable AC voltage profile for
-all DC-optimized operating points. Examples are BAKER (minimum 0.70215 pu) and
-CAMUS (maximum 1.17382 pu). These snapshots remain fail-closed until an approved
-Q/voltage/control policy or authoritative PLEXOS outputs are provided.
+PLEXOS output supplies active dispatch and commitment but no reactive dispatch.
+The authoritative static AC contract is present and load Q uses
+`preserve_base_pf`; these inputs still cannot guarantee an acceptable AC state
+for every optimized active-power schedule. Examples are BAKER (minimum 0.70215
+pu) and CAMUS (maximum 1.17382 pu). The adapter records these outcomes without
+turning on committed-off thermal units or changing preserved transformer/shunt
+controls merely to obtain convergence.
 
 `unattributed_swing_mw` is recorded as
 `PowerFlowSummary.GenerationMW - sum(Unit.PresentMW)` at system level only. It

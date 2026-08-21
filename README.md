@@ -12,12 +12,15 @@ PLEXOS Solution / Generation table
        phase / period / sample / unit validation
                   │
                   ▼
-       approved Generator + Load crosswalks
+       approved Generator + Load + Branch crosswalks
        PLEXOS GUID / RTS bus+load ID → ODMS mRID
                   │
           ┌───────┴────────┐
           ▼                ▼
  ODMS Load.SetLoad(P,Q) → class-aware status → Unit.SetGeneration(P,Q)
+          │                         │
+          │               static Q limits / regulating V setpoint
+          └────────────── branch Condition A/B/C ratings
           │
           ▼
        Power Flow
@@ -60,13 +63,16 @@ The RTS crosswalk builders are benchmark profiles, not a generic identity
 algorithm. Production runs consume reviewed crosswalks whose final contracts
 are PLEXOS GUID → ODMS mRID and source bus/load-ID → ODMS mRID.
 
-Build and explicitly approve the reviewable crosswalk:
+Build and explicitly approve the reviewable generator crosswalk. Official
+`gen.csv` supplies the static AC contract; `MW Inj`/`MVAR Inj` are base-case
+calibration references, while PLEXOS Generation remains authoritative for P(t):
 
 ```powershell
 python -m plexos_output2odms build-crosswalk `
   "D:\ODMS\Test Adapter\PLEXOS_output\RTS-GMLC\RTS-GMLC.txt" `
   "D:\ODMS\tmp\rts_gmlc_odms_compare\odms_cim17\odms_rts_gmlc_cim17.xml" `
   "D:\ODMS\tmp\plexos_output2odms_rts\generator_crosswalk.json" `
+  --generator-data "D:\...\RTS_Data\SourceData\gen.csv" `
   --approve
 ```
 
@@ -79,6 +85,30 @@ python -m plexos_output2odms build-load-crosswalk `
   "D:\ODMS\tmp\plexos_output2odms_rts\load_crosswalk.json" `
   --approve
 ```
+
+Audit the real ODMS base case, calibrate it against official RTS source data,
+and build the branch-rating crosswalk:
+
+```powershell
+scripts\run_odms_ac_audit.ps1 `
+  -ResponseJson "D:\...\base_odms_ac_audit.json" `
+  -Server ".\SQLEXPRESS" -Model "RTS-GMLC"
+
+python -m plexos_output2odms calibrate-base-ac `
+  "D:\...\gen.csv" "D:\...\bus.csv" `
+  "D:\...\generator_crosswalk.json" "D:\...\load_crosswalk.json" `
+  "D:\...\branch_crosswalk.json" "D:\...\base_odms_ac_audit.json" `
+  "D:\...\base_ac_calibration.json"
+
+python -m plexos_output2odms build-branch-crosswalk `
+  "D:\...\branch.csv" "D:\...\base_odms_ac_audit.json" `
+  "D:\...\branch_crosswalk.json" --approve
+```
+
+For RTS-GMLC, the explicit thermal contract is `Cont → ConditionA`,
+`LTE → ConditionB`, and `STE → ConditionC`. The same-case RAW file confirms
+Condition A but collapses RATEB/RATEC to RATEA, so reviewed `branch.csv` is the
+authoritative source for emergency ratings.
 
 Build one timestamp:
 
@@ -95,6 +125,7 @@ python -m plexos_output2odms build-snapshot `
   --missing-dispatch preserve `
   --regional-load "D:\...\Load\DAY_AHEAD_regional_Load.csv" `
   --load-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\load_crosswalk.json" `
+  --branch-crosswalk "D:\ODMS\tmp\plexos_output2odms_rts\branch_crosswalk.json" `
   --commitment "D:\...\allTX\PLEXOS_DA_solution_commitment.csv"
 ```
 
@@ -103,7 +134,8 @@ Outputs:
 - `dispatch.normalized.csv`: requested `ScheduledMW`, identity and CIM sign.
 - `load.normalized.csv`: authoritative nodal P allocation and derived Q embedding.
 - `status.normalized.csv`: class-aware commitment action or explicit preserve.
-- `operating_snapshot.json`: complete typed runtime artifact.
+- `operating_snapshot.json`: complete typed runtime artifact, including static
+  generator AC controls and branch ratings.
 - `dispatch.validation.json`: fail-closed findings.
 - `dispatch.audit.json`: source hashes, selection and mapping totals.
 - `PLEXOS_DISPATCH_SSH.xml`: CIM17 SSH representation.
@@ -130,6 +162,7 @@ python -m plexos_output2odms run-timeseries `
   "D:\...\PLEXOS_DA_solution_commitment_allTX.csv" `
   "D:\...\commissioning_24h" `
   --start 2020-07-05T00:00:00 --hours 24 --unit MW `
+  --branch-crosswalk "D:\...\branch_crosswalk.json" `
   --analysis-timezone UTC --mode analysis-only
 ```
 
@@ -166,6 +199,12 @@ voltage, generator status/operating limits, and rated branch/transformer loading
 authoritative solved total because ODMS `Unit.PresentMW` does not expose the
 swing-compensation component in this case. The adapter reports the system-level
 difference as `unattributed_swing_mw` and never assigns it to an individual unit.
+
+Runtime results separate adapter validity from AC operating quality. A snapshot
+can be `adapter_valid=true` while its PF is non-converged or violates voltage,
+generator, or branch limits. `outcome_class` gives the primary result and
+`outcome_flags` preserves simultaneous violations. Missing mapping, control, or
+limit data fails closed and is never disguised by widening tolerances.
 
 The ODMS 14.2 installation links Python 3.13; the launcher temporarily prepends
 the local Python 3.13 runtime to `PATH` for the child process.

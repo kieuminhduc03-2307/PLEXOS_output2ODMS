@@ -44,6 +44,12 @@ def _result_row(time_data: dict, response: dict | None, error: str | None) -> di
         "analysis_timezone": time_data.get("analysis_timezone"),
         "timestamp_utc": time_data.get("timestamp_utc"),
         "valid": bool(response.get("valid")),
+        "adapter_valid": bool(response.get("adapter_valid")),
+        "ac_valid": bool(response.get("ac_valid")),
+        "outcome_class": response.get("outcome_class") or (
+            "MAPPING_INVALID" if error else None
+        ),
+        "outcome_flags": "|".join(response.get("outcome_flags") or []),
         "power_flow_converged": bool(response.get("power_flow_converged")),
         "generator_requested_mw": pre.get("generator_requested_mw"),
         "generator_readback_mw": pre.get("generator_readback_mw"),
@@ -61,6 +67,11 @@ def _result_row(time_data: dict, response: dict | None, error: str | None) -> di
         "maximum_voltage_pu": gates.get("maximum_voltage_pu"),
         "maximum_loading_percent": gates.get("maximum_loading_percent"),
         "engineering_gates_passed": gates.get("passed"),
+        "voltage_violation_count": gates.get("voltage_violation_count"),
+        "generator_violation_count": gates.get("generator_violation_count"),
+        "overload_count": gates.get("overload_count"),
+        "rated_branch_count": gates.get("monitored_branch_count"),
+        "unrated_branch_count": gates.get("unrated_branch_count"),
         "failure": error or response.get("error_message"),
     }
 
@@ -74,6 +85,7 @@ def run_timeseries(
     regional_load: Path,
     load_crosswalk: Path,
     commitment: Path,
+    branch_crosswalk: Path | None,
     config: TimeSeriesConfig,
 ) -> dict:
     if config.mode == "native-schedule":
@@ -91,6 +103,8 @@ def run_timeseries(
         raise ValueError("No timestamps match the requested time-series window")
     output.mkdir(parents=True, exist_ok=True)
     source_files = [solution, crosswalk, target_cim, regional_load, load_crosswalk, commitment]
+    if branch_crosswalk is not None:
+        source_files.append(branch_crosswalk)
     manifest = {
         "schema": "plexos-output2odms-run-manifest-v1",
         "created_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -117,6 +131,7 @@ def run_timeseries(
             regional_load_path=regional_load,
             load_crosswalk_path=load_crosswalk,
             commitment_path=commitment,
+            branch_crosswalk_path=branch_crosswalk,
         )
         context = SourceTimeContext(
             timestamp,
@@ -156,7 +171,16 @@ def run_timeseries(
                 error = completed.stderr.strip() or f"ODMS runner exit code {completed.returncode}"
         row = _result_row(context.to_dict(), response, error)
         rows.append(row)
-        entry.update({"valid": row["valid"], "failure": row["failure"]})
+        entry.update(
+            {
+                "valid": row["valid"],
+                "adapter_valid": row["adapter_valid"],
+                "ac_valid": row["ac_valid"],
+                "outcome_class": row["outcome_class"],
+                "outcome_flags": row["outcome_flags"],
+                "failure": row["failure"],
+            }
+        )
         manifest["entries"].append(entry)
         (output / "run_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     fields = list(rows[0])
@@ -166,6 +190,11 @@ def run_timeseries(
         writer.writerows(rows)
     manifest["completed_timestamp_count"] = len(rows)
     manifest["valid_timestamp_count"] = sum(bool(row["valid"]) for row in rows)
+    manifest["adapter_valid_timestamp_count"] = sum(bool(row["adapter_valid"]) for row in rows)
+    manifest["outcome_counts"] = {
+        outcome: sum(row["outcome_class"] == outcome for row in rows)
+        for outcome in sorted({row["outcome_class"] for row in rows if row["outcome_class"]})
+    }
     manifest["all_valid"] = all(bool(row["valid"]) for row in rows)
     (output / "run_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest

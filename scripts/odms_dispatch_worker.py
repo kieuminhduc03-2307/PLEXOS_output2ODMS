@@ -25,6 +25,7 @@ def read_snapshot(path):
     if payload.get("schema") not in (
         "plexos-output2odms-operating-snapshot-v1",
         "plexos-output2odms-operating-snapshot-v2",
+        "plexos-output2odms-operating-snapshot-v3",
     ):
         raise ValueError("Unsupported operating snapshot schema")
     return (
@@ -32,6 +33,9 @@ def read_snapshot(path):
         payload.get("load_setpoints", []),
         payload.get("unit_statuses", []),
         payload.get("audit_units", []),
+        payload.get("voltage_targets", []),
+        payload.get("reactive_capabilities", []),
+        payload.get("branch_ratings", []),
         (payload.get("time") or {}).get("source_wall_clock") or payload.get("timestamp"),
     )
 
@@ -117,7 +121,11 @@ def engineering_gates(case, resolved_units, request):
             else:
                 unrated_branches.append({"name": branch.Name, "element_type": str(element_type)})
     overloads = [row for row in branch_rows if row["percent_of_limit"] > max_loading]
-    passed = bool(bus_rows) and not voltage_violations and not generator_violations and not overloads
+    limit_data_complete = branch_device_count > 0 and not unrated_branches
+    passed = (
+        bool(bus_rows) and limit_data_complete and not voltage_violations
+        and not generator_violations and not overloads
+    )
     return {
         "passed": passed,
         "voltage_range_pu": [min_voltage, max_voltage],
@@ -136,8 +144,73 @@ def engineering_gates(case, resolved_units, request):
         "in_service_branch_count": branch_device_count,
         "unrated_branch_count": len(unrated_branches),
         "unrated_branches": unrated_branches,
+        "limit_data_complete": limit_data_complete,
         "overload_count": len(overloads),
         "overloads": overloads,
+    }
+
+
+def network_control_audit(case):
+    transformers = []
+    for transformer in devices(case, pssoPy.ElementType.Transformer):
+        control = transformer.GetControl()
+        if control is None or control.IsNull() or control.IsError():
+            control_row = None
+        else:
+            section = control.GetSection()
+            control_row = {
+                "control_type": str(control.ControlType),
+                "tap_changing": bool(control.TapChanging),
+                "fixed": bool(control.Fixed),
+                "current_tap_position": float(control.CurrentTapPosition),
+                "minimum_tap_position": float(control.MinimumTapPosition),
+                "maximum_tap_position": float(control.MaximumTapPosition),
+                "minimum_kv": float(control.MinimumkV),
+                "maximum_kv": float(control.MaximumkV),
+                "present_kv": float(control.PresentkV),
+                "controlled_bus": int(section.MappedBusNumber),
+            }
+        transformers.append({"name": transformer.Name, "control": control_row})
+    banks = []
+    for bank in devices(case, pssoPy.ElementType.Bank):
+        controlled = bank.GetControlledSection()
+        banks.append(
+            {
+                "name": bank.Name,
+                "in_service": bool(bank.IsInService()),
+                "control_mode": str(bank.ControlMode),
+                "is_fixed": bool(bank.IsFixed),
+                "maximum_sections": int(bank.MaximumSections),
+                "switched_on_sections": int(bank.SwitchedOnSections),
+                "mvar_per_section": float(bank.MvarPerSection),
+                "bank_mvar": float(bank.BankMvar),
+                "controlled_bus": int(controlled.MappedBusNumber),
+                "minimum_kv": float(bank.MinimumkV),
+                "maximum_kv": float(bank.MaximumkV),
+            }
+        )
+    svcs = []
+    for svc in devices(case, pssoPy.ElementType.SVC):
+        controlled = svc.GetControlledSection()
+        svcs.append(
+            {
+                "name": svc.Name,
+                "in_service": bool(svc.IsInService()),
+                "control_mode": str(svc.ControlMode),
+                "set_point": float(svc.SetPoint),
+                "slope": float(svc.Slope),
+                "present_mvar": float(svc.PresentMvar),
+                "controlled_bus": int(controlled.MappedBusNumber),
+            }
+        )
+    return {
+        "transformer_count": len(transformers),
+        "transformer_control_count": sum(row["control"] is not None for row in transformers),
+        "transformers": transformers,
+        "bank_count": len(banks),
+        "banks": banks,
+        "svc_count": len(svcs),
+        "svcs": svcs,
     }
 
 
@@ -147,13 +220,20 @@ def main():
         request = json.load(stream)
     response = {
         "valid": False,
+        "adapter_valid": False,
+        "ac_valid": False,
+        "outcome_class": "MAPPING_INVALID",
+        "outcome_flags": ["MAPPING_INVALID"],
         "stage": "starting",
         "odms_version": odmsPy.GetVersion(),
         "model": odmsPy.Model().GetModelName(),
         "server": odmsPy.Model().GetServer(),
     }
     try:
-        rows, load_rows, status_rows, audit_unit_rows, timestamp = read_snapshot(
+        (
+            rows, load_rows, status_rows, audit_unit_rows, voltage_targets,
+            reactive_capabilities, branch_ratings, timestamp,
+        ) = read_snapshot(
             request["operating_snapshot"]
         )
         if not load_rows:
@@ -215,6 +295,10 @@ def main():
         units_by_mrid = {
             row["target_machine_mrid"].lstrip("#"): unit for row, unit in resolved_units
         }
+        unit_base_kv_by_mrid = {
+            row["target_machine_mrid"].lstrip("#"): float(unit.GetBus().BasekV)
+            for row, unit in resolved_units
+        }
         resolved_statuses = []
         for row in status_rows:
             expected_rdf = row["target_machine_mrid"].lstrip("#")
@@ -225,6 +309,35 @@ def main():
                     + row["target_machine_name"]
                 )
             resolved_statuses.append((row, unit))
+        voltage_by_mrid = {
+            row["target_machine_mrid"].lstrip("#"): row for row in voltage_targets
+        }
+        reactive_by_mrid = {
+            row["target_machine_mrid"].lstrip("#"): row for row in reactive_capabilities
+        }
+        if set(voltage_by_mrid) - set(units_by_mrid):
+            raise RuntimeError("Voltage targets contain generators outside approved setpoints")
+        if set(reactive_by_mrid) - set(units_by_mrid):
+            raise RuntimeError("Reactive capabilities contain generators outside approved setpoints")
+        if request.get("require_ac_control_contract", True) and (
+            set(voltage_by_mrid) != set(units_by_mrid)
+            or set(reactive_by_mrid) != set(units_by_mrid)
+        ):
+            response.update(
+                {
+                    "stage": "input_control_data_missing",
+                    "adapter_valid": True,
+                    "ac_valid": False,
+                    "outcome_class": "INPUT_CONTROL_DATA_MISSING",
+                    "outcome_flags": ["INPUT_CONTROL_DATA_MISSING"],
+                    "control_contract": {
+                        "generator_count": len(units_by_mrid),
+                        "voltage_target_count": len(voltage_by_mrid),
+                        "reactive_capability_count": len(reactive_by_mrid),
+                    },
+                }
+            )
+            raise ValueError("OperatingSnapshot has incomplete generator AC control contract")
         resolved_audit_units = []
         for row in audit_unit_rows:
             unit = case.GetUnit(row["target_machine_name"])
@@ -235,6 +348,56 @@ def main():
             if actual_rdf != expected_rdf:
                 raise RuntimeError("ODMS audit Unit identity mismatch: " + row["target_machine_name"])
             resolved_audit_units.append((row, unit))
+
+        runtime_branches = {}
+        for element_type in (
+            pssoPy.ElementType.Line,
+            pssoPy.ElementType.Transformer,
+            pssoPy.ElementType.PhaseShifter,
+        ):
+            for branch in devices(case, element_type):
+                runtime_branches[(branch.GetRdfID() or "").lstrip("#")] = branch
+        initialized_branch_ratings = []
+        for row in branch_ratings:
+            expected_mrid = row["target_mrid"].lstrip("#")
+            branch = runtime_branches.get(expected_mrid)
+            if branch is None:
+                raise RuntimeError("ODMS branch rating target not found: " + row["target_name"])
+            if branch.Name != row["target_name"]:
+                raise RuntimeError("ODMS branch rating identity mismatch: " + row["target_name"])
+            limits = branch.GetFlowLimits(pssoPy.LimitCondition.ConditionA)
+            before = {
+                label: float(getattr(limits, label))
+                for label in (
+                    "FromLimitA", "ToLimitA", "FromLimitB", "ToLimitB",
+                    "FromLimitC", "ToLimitC",
+                )
+            }
+            for end in ("From", "To"):
+                setattr(limits, end + "LimitA", float(row["condition_a_mva"]))
+                setattr(limits, end + "LimitB", float(row["condition_b_mva"]))
+                setattr(limits, end + "LimitC", float(row["condition_c_mva"]))
+            if not limits.Update():
+                raise RuntimeError("ODMS flow-limit update failed: " + row["target_name"])
+            readback = branch.GetFlowLimits(pssoPy.LimitCondition.ConditionA)
+            after = {
+                label: float(getattr(readback, label))
+                for label in (
+                    "FromLimitA", "ToLimitA", "FromLimitB", "ToLimitB",
+                    "FromLimitC", "ToLimitC",
+                )
+            }
+            expected = {
+                "FromLimitA": float(row["condition_a_mva"]),
+                "ToLimitA": float(row["condition_a_mva"]),
+                "FromLimitB": float(row["condition_b_mva"]),
+                "ToLimitB": float(row["condition_b_mva"]),
+                "FromLimitC": float(row["condition_c_mva"]),
+                "ToLimitC": float(row["condition_c_mva"]),
+            }
+            if any(abs(after[key] - value) > 1e-3 for key, value in expected.items()):
+                raise RuntimeError("ODMS flow-limit readback mismatch: " + row["target_name"])
+            initialized_branch_ratings.append(dict(row, before=before, after=after))
 
         initialized_loads = []
         for row, load in resolved_loads:
@@ -272,6 +435,82 @@ def main():
                     previous_in_service=previous,
                     initialized_in_service=readback,
                 )
+            )
+        initialized_ac_controls = []
+        ac_tolerance = float(request.get("ac_control_readback_tolerance", 1e-2))
+        for row, unit in resolved_units:
+            mrid = row["target_machine_mrid"].lstrip("#")
+            reactive = reactive_by_mrid.get(mrid)
+            voltage = voltage_by_mrid.get(mrid)
+            before = {
+                "minimum_mvar": float(unit.MinimumMvar),
+                "maximum_mvar": float(unit.MaximumMvar),
+                "scheduled_kv": float(unit.ScheduledKV),
+                "regulating_code": str(unit.RegulatingCode),
+                "regulating_code_value": int(unit.RegulatingCode),
+            }
+            if reactive is not None:
+                q_min = float(reactive["q_min_mvar"])
+                q_max = float(reactive["q_max_mvar"])
+                if q_min > q_max:
+                    raise ValueError("Invalid reactive capability for " + row["target_machine_name"])
+                if not unit.SetReactiveLimits(q_min, q_max):
+                    raise RuntimeError("SetReactiveLimits failed for " + row["target_machine_name"])
+            voltage_action = "not_provided"
+            requested_kv = None
+            if voltage is not None:
+                if (
+                    unit.RegulatingCode == pssoPy.UnitRegulatingCode.Regulating
+                    and bool(unit.IsInService())
+                ):
+                    requested_kv = (
+                        float(voltage["voltage_setpoint_pu"]) * unit_base_kv_by_mrid[mrid]
+                    )
+                    if abs(float(unit.ScheduledKV) - requested_kv) <= ac_tolerance:
+                        voltage_action = "validated_existing_regulating_setpoint"
+                    else:
+                        if not unit.SetScheduledVoltage(requested_kv):
+                            raise RuntimeError(
+                                "SetScheduledVoltage failed for %s: current=%r requested=%r code=%r status=%r"
+                                % (
+                                    row["target_machine_name"], float(unit.ScheduledKV),
+                                    requested_kv, str(unit.RegulatingCode), bool(unit.IsInService()),
+                                )
+                            )
+                        voltage_action = "applied_regulating_unit"
+                elif unit.RegulatingCode == pssoPy.UnitRegulatingCode.Regulating:
+                    voltage_action = "preserved_out_of_service_regulating_unit"
+                else:
+                    voltage_action = "preserved_nonregulating_unit"
+            if not unit.Init():
+                raise RuntimeError("AC control refresh failed for " + row["target_machine_name"])
+            after = {
+                "minimum_mvar": float(unit.MinimumMvar),
+                "maximum_mvar": float(unit.MaximumMvar),
+                "scheduled_kv": float(unit.ScheduledKV),
+                "regulating_code": str(unit.RegulatingCode),
+                "regulating_code_value": int(unit.RegulatingCode),
+            }
+            if reactive is not None and (
+                abs(after["minimum_mvar"] - float(reactive["q_min_mvar"])) > ac_tolerance
+                or abs(after["maximum_mvar"] - float(reactive["q_max_mvar"])) > ac_tolerance
+            ):
+                raise RuntimeError("Reactive limit readback mismatch for " + row["target_machine_name"])
+            if requested_kv is not None and abs(after["scheduled_kv"] - requested_kv) > ac_tolerance:
+                raise RuntimeError("ScheduledKV readback mismatch for " + row["target_machine_name"])
+            initialized_ac_controls.append(
+                {
+                    "name": row["target_machine_name"],
+                    "mrid": mrid,
+                    "before": before,
+                    "after": after,
+                    "voltage_action": voltage_action,
+                    "requested_voltage_pu": (
+                        float(voltage["voltage_setpoint_pu"]) if voltage is not None else None
+                    ),
+                    "requested_kv": requested_kv,
+                    "q_schedule_policy": "ODMS_BASE_SCHEDULE_PRESERVED_NOT_PLEXOS_Q_TIMESERIES",
+                }
             )
         initialized = []
         for row, unit in resolved_units:
@@ -361,6 +600,9 @@ def main():
         response.update(
             {
                 "stage": "operating_snapshot_initialized",
+                "adapter_valid": True,
+                "outcome_class": "ADAPTER_VALID_PENDING_AC",
+                "outcome_flags": [],
                 "initialized_row_count": len(initialized),
                 "initialized_load_count": len(initialized_loads),
                 "requested_scheduled_mw_total": requested_generation,
@@ -374,11 +616,25 @@ def main():
                 "preflight": preflight,
                 "load_rows": initialized_loads,
                 "status_rows": initialized_statuses,
+                "ac_control_rows": initialized_ac_controls,
+                "branch_rating_rows": initialized_branch_ratings,
             }
         )
         converged = bool(case.SolvePowerFlow() and case.IsPowerFlowValid())
         if not converged:
-            response["power_flow_converged"] = False
+            response.update(
+                {
+                    "power_flow_converged": False,
+                    "adapter_valid": True,
+                    "ac_valid": False,
+                    "outcome_class": "ADAPTER_VALID_AC_NONCONVERGED",
+                    "outcome_flags": ["ADAPTER_VALID_AC_NONCONVERGED"],
+                    "network_summary": {
+                        "active_islands": int(case.GetNetworkSummary().ActiveIslands),
+                    },
+                    "power_flow_summary": get_power_flow_summary(case),
+                }
+            )
             raise RuntimeError("ODMS Power Flow did not converge: " + pssoPy.GetLastError())
         solved_rows = []
         for row in rows:
@@ -443,6 +699,8 @@ def main():
                 "PowerFlowSummary.GenerationMW is authoritative for system balance."
             ),
             "slack_candidates": slack_candidates,
+            "active_islands": int(case.GetNetworkSummary().ActiveIslands),
+            "network_controls": network_control_audit(case),
         }
         postflight["swing_priority_units"] = [
             {
@@ -487,6 +745,10 @@ def main():
                 response.update(
                     {
                         "stage": "power_flow_postflight_failed",
+                        "adapter_valid": True,
+                        "ac_valid": False,
+                        "outcome_class": "ADAPTER_VALID_ACCOUNTING_RESIDUAL",
+                        "outcome_flags": ["ADAPTER_VALID_ACCOUNTING_RESIDUAL"],
                         "power_flow_converged": True,
                         "power_flow_summary": power_flow_summary,
                         "postflight": postflight,
@@ -501,9 +763,32 @@ def main():
         gates = engineering_gates(case, resolved_units, request)
         postflight["engineering_gates"] = gates
         if not gates["passed"]:
+            outcome_flags = []
+            if not gates["limit_data_complete"]:
+                outcome_flags.append("LIMIT_DATA_MISSING")
+            if gates["generator_violation_count"]:
+                outcome_flags.append("ADAPTER_VALID_AC_GENERATOR_LIMIT_VIOLATION")
+            if gates["overload_count"]:
+                outcome_flags.append("ADAPTER_VALID_AC_OVERLOAD")
+            if gates["voltage_violation_count"]:
+                outcome_flags.append("ADAPTER_VALID_AC_VOLTAGE_VIOLATION")
+            if not gates["limit_data_complete"]:
+                outcome_class = "LIMIT_DATA_MISSING"
+            elif gates["generator_violation_count"]:
+                outcome_class = "ADAPTER_VALID_AC_GENERATOR_LIMIT_VIOLATION"
+            elif gates["overload_count"]:
+                outcome_class = "ADAPTER_VALID_AC_OVERLOAD"
+            elif gates["voltage_violation_count"]:
+                outcome_class = "ADAPTER_VALID_AC_VOLTAGE_VIOLATION"
+            else:
+                outcome_class = "ADAPTER_VALID_AC_ENGINEERING_VIOLATION"
             response.update(
                 {
                     "stage": "engineering_gates_failed",
+                    "adapter_valid": True,
+                    "ac_valid": False,
+                    "outcome_class": outcome_class,
+                    "outcome_flags": outcome_flags,
                     "power_flow_converged": True,
                     "power_flow_summary": power_flow_summary,
                     "postflight": postflight,
@@ -525,6 +810,10 @@ def main():
         response.update(
             {
                 "valid": True,
+                "adapter_valid": True,
+                "ac_valid": True,
+                "outcome_class": "ADAPTER_VALID_AC_VALID",
+                "outcome_flags": [],
                 "stage": "power_flow_converged",
                 "power_flow_converged": converged,
                 "sv_stored": sv_stored,

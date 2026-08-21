@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
@@ -45,6 +46,33 @@ class GeneratorMapping:
     source_operating_class: str = ""
     status_policy: str = ""
     target_kind: str = "SynchronousMachine"
+    source_base_p_mw: float | None = None
+    source_base_q_mvar: float | None = None
+    source_voltage_setpoint_pu: float | None = None
+    source_q_min_mvar: float | None = None
+    source_q_max_mvar: float | None = None
+    ac_control_policy: str = ""
+
+
+def _rts_generator_ac_data(path: str | Path) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            name = row["GEN UID"].strip()
+            if name in result:
+                raise ValueError(f"Duplicate RTS generator AC record: {name}")
+            result[name] = {
+                "bus_id": row["Bus ID"].strip(),
+                "gen_id": row["Gen ID"].strip(),
+                "base_p_mw": float(row["MW Inj"]),
+                "base_q_mvar": float(row["MVAR Inj"]),
+                "voltage_setpoint_pu": float(row["V Setpoint p.u."]),
+                "q_min_mvar": float(row["QMin MVAR"]),
+                "q_max_mvar": float(row["QMax MVAR"]),
+            }
+    if not result:
+        raise ValueError("RTS generator AC data contains no rows")
+    return result
 
 
 def _rts_operating_metadata(source_name: str) -> tuple[str, str]:
@@ -195,8 +223,14 @@ def build_rts_gmlc_crosswalk(
     odms_cim: str | Path,
     *,
     approved: bool = False,
+    generator_data: str | Path | None = None,
 ) -> list[GeneratorMapping]:
     source = _model_generators(plexos_model)
+    ac_data = _rts_generator_ac_data(generator_data) if generator_data else {}
+    if ac_data and set(ac_data) != {item["name"] for item in source}:
+        missing = sorted({item["name"] for item in source} - set(ac_data))
+        extra = sorted(set(ac_data) - {item["name"] for item in source})
+        raise ValueError(f"RTS generator AC identity mismatch: missing={missing[:20]} extra={extra[:20]}")
     entities = _cim_entities(odms_cim)
     machines: dict[str, tuple[str, dict]] = {}
     for identifier, entity in entities.items():
@@ -254,6 +288,7 @@ def build_rts_gmlc_crosswalk(
     for generator, target, basis in sorted(pairs, key=lambda item: item[0]["name"]):
         name = generator["name"]
         operating_class, status_policy = _rts_operating_metadata(name)
+        ac = ac_data.get(name)
         bus = generator["node"]
         capacity = generator["max_capacity"]
         target_name, machine_id, machine, unit = target
@@ -277,6 +312,12 @@ def build_rts_gmlc_crosswalk(
                 max_operating_p_mw=float(maximum) if maximum else None,
                 source_operating_class=operating_class,
                 status_policy=status_policy,
+                source_base_p_mw=ac["base_p_mw"] if ac else None,
+                source_base_q_mvar=ac["base_q_mvar"] if ac else None,
+                source_voltage_setpoint_pu=ac["voltage_setpoint_pu"] if ac else None,
+                source_q_min_mvar=ac["q_min_mvar"] if ac else None,
+                source_q_max_mvar=ac["q_max_mvar"] if ac else None,
+                ac_control_policy="ODMS_REGULATING_ONLY" if ac else "",
             )
         )
     if missing:
@@ -288,13 +329,15 @@ def build_rts_gmlc_crosswalk(
 
 
 def write_crosswalk(
-    mappings: list[GeneratorMapping], path: str | Path, *, source_model: str, target_cim: str
+    mappings: list[GeneratorMapping], path: str | Path, *, source_model: str, target_cim: str,
+    generator_data: str | None = None,
 ) -> None:
     payload = {
         "schema": "plexos-output2odms-generator-crosswalk-v1",
         "source_system": "PLEXOS",
         "source_model": source_model,
         "target_cim": target_cim,
+        "generator_ac_data": generator_data,
         "mapping_count": len(mappings),
         "mappings": [asdict(item) for item in mappings],
     }

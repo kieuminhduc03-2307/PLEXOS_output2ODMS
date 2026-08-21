@@ -14,6 +14,7 @@ from .crosswalk.generator_dispatch import (
     load_crosswalk,
 )
 from .crosswalk.load_snapshot import load_load_crosswalk
+from .crosswalk.branch_ratings import load_branch_rating_crosswalk
 from .odms.ssh import write_ssh
 from .plexos_solution.dispatch import SolutionSelection
 from .plexos_solution.commitment import build_class_aware_statuses, read_wide_commitment
@@ -44,6 +45,7 @@ class SnapshotResult:
     load_rows: list[dict]
     status_rows: list[dict]
     audit_unit_rows: list[dict]
+    branch_rating_rows: list[dict]
     report: ValidationReport
     audit: dict
 
@@ -99,14 +101,38 @@ class SnapshotResult:
 
     def write_operating_snapshot(self, path: str | Path) -> None:
         payload = {
-            "schema": "plexos-output2odms-operating-snapshot-v2",
+            "schema": "plexos-output2odms-operating-snapshot-v3",
             "time": self.audit["selection"]["time"],
             "generator_setpoints": self.rows,
             "load_setpoints": self.load_rows,
             "unit_statuses": self.status_rows,
             "audit_units": self.audit_unit_rows,
-            "voltage_targets": [],
-            "mvar_targets": [],
+            "voltage_targets": [
+                {
+                    "target_machine_name": row["target_machine_name"],
+                    "target_machine_mrid": row["target_machine_mrid"],
+                    "voltage_setpoint_pu": row["source_voltage_setpoint_pu"],
+                    "policy": row["ac_control_policy"],
+                    "provenance": "RTS_SOURCE_DATA_GEN_CSV",
+                }
+                for row in self.rows
+                if row.get("source_voltage_setpoint_pu") is not None
+            ],
+            "reactive_capabilities": [
+                {
+                    "target_machine_name": row["target_machine_name"],
+                    "target_machine_mrid": row["target_machine_mrid"],
+                    "q_min_mvar": row["source_q_min_mvar"],
+                    "q_max_mvar": row["source_q_max_mvar"],
+                    "base_q_reference_mvar": row["source_base_q_mvar"],
+                    "policy": "VALIDATE_AND_APPLY_STATIC_CAPABILITY",
+                    "provenance": "RTS_SOURCE_DATA_GEN_CSV",
+                }
+                for row in self.rows
+                if row.get("source_q_min_mvar") is not None
+                and row.get("source_q_max_mvar") is not None
+            ],
+            "branch_ratings": self.branch_rating_rows,
             "preflight": self.audit["preflight"],
             "provenance": self.audit["sources"],
         }
@@ -153,6 +179,7 @@ def build_dispatch_snapshot(
     regional_load_path: str | Path | None = None,
     load_crosswalk_path: str | Path | None = None,
     commitment_path: str | Path | None = None,
+    branch_crosswalk_path: str | Path | None = None,
 ) -> SnapshotResult:
     config = config or SnapshotConfig()
     if timestamp.tzinfo is not None:
@@ -251,6 +278,12 @@ def build_dispatch_snapshot(
                 "source_operating_class": mapping.source_operating_class,
                 "status_policy": mapping.status_policy,
                 "target_kind": mapping.target_kind,
+                "source_base_p_mw": mapping.source_base_p_mw,
+                "source_base_q_mvar": mapping.source_base_q_mvar,
+                "source_voltage_setpoint_pu": mapping.source_voltage_setpoint_pu,
+                "source_q_min_mvar": mapping.source_q_min_mvar,
+                "source_q_max_mvar": mapping.source_q_max_mvar,
+                "ac_control_policy": mapping.ac_control_policy,
                 "scheduled_mw": value,
                 "cim_p_mw": -value,
                 "cim_rotating_machine_p_mw": -value,
@@ -368,6 +401,30 @@ def build_dispatch_snapshot(
         report.error("STATUS_MODE_INVALID", f"Unsupported status mode: {config.status_mode}")
 
     setpoint_mrids = {row["target_machine_mrid"] for row in rows}
+    branch_rating_rows: list[dict] = []
+    if branch_crosswalk_path is not None:
+        branch_crosswalk_file = Path(branch_crosswalk_path)
+        branch_rating_rows = [
+            {
+                "source_uid": row.source_uid,
+                "source_from_bus": row.source_from_bus,
+                "source_to_bus": row.source_to_bus,
+                "condition_a_mva": row.source_cont_rating_mva,
+                "condition_b_mva": row.source_lte_rating_mva,
+                "condition_c_mva": row.source_ste_rating_mva,
+                "target_name": row.target_name,
+                "target_mrid": row.target_mrid,
+                "target_kind": row.target_kind,
+                "rating_contract": row.rating_contract,
+                "provenance": "RTS_SOURCE_DATA_BRANCH_CSV",
+            }
+            for row in load_branch_rating_crosswalk(branch_crosswalk_file)
+        ]
+    else:
+        report.warning(
+            "BRANCH_RATING_CONTRACT_ABSENT",
+            "No approved branch rating crosswalk was supplied; overload coverage is unavailable.",
+        )
     mapped_by_mrid = {item.odms_synchronous_machine_mrid: item for item in mappings}
     audit_unit_rows: list[dict] = []
     for machine in list_odms_synchronous_machines(target_cim):
@@ -413,6 +470,12 @@ def build_dispatch_snapshot(
         sources["commitment"] = {
             "path": str(commitment_file.resolve()),
             "sha256": _sha256(commitment_file),
+        }
+    if branch_crosswalk_path is not None:
+        branch_crosswalk_file = Path(branch_crosswalk_path)
+        sources["branch_rating_crosswalk"] = {
+            "path": str(branch_crosswalk_file.resolve()),
+            "sha256": _sha256(branch_crosswalk_file),
         }
     audit = {
         "schema": "plexos-output2odms-audit-v2",
@@ -463,6 +526,10 @@ def build_dispatch_snapshot(
             "count": len(audit_unit_rows),
             "targets": audit_unit_rows,
         },
+        "branch_ratings": {
+            "count": len(branch_rating_rows),
+            "contract": "Cont->A; LTE->B; STE->C" if branch_rating_rows else None,
+        },
         "validation": report.to_dict(),
     }
     audit["ssh_dependency"] = dependency
@@ -471,6 +538,7 @@ def build_dispatch_snapshot(
         sorted(load_rows, key=lambda item: int(item["source_bus_id"])),
         status_rows,
         audit_unit_rows,
+        branch_rating_rows,
         report,
         audit,
     )

@@ -38,9 +38,22 @@ def test_crosswalk_matches_exact_bus_capacity_and_target_mrid(tmp_path: Path):
 </rdf:RDF>""",
         encoding="utf-8",
     )
-    mappings = build_rts_gmlc_crosswalk(model, cim, approved=True)
+    generator_data = tmp_path / "gen.csv"
+    generator_data.write_text(
+        "GEN UID,Bus ID,Gen ID,MW Inj,MVAR Inj,V Setpoint p.u.,QMax MVAR,QMin MVAR\n"
+        "101_CT_1,101,1,8,4.96,1.0468,10,0\n"
+        "101_STEAM_2,101,2,76,0.14,1.0468,30,-25\n",
+        encoding="utf-8",
+    )
+    mappings = build_rts_gmlc_crosswalk(
+        model, cim, approved=True, generator_data=generator_data
+    )
     assert [(item.source_name, item.odms_machine_name) for item in mappings] == [
         ("101_CT_1", "101_1"),
         ("101_STEAM_2", "101_2"),
     ]
     assert all(item.approved for item in mappings)
+    assert mappings[0].source_voltage_setpoint_pu == 1.0468
+    assert mappings[1].source_q_min_mvar == -25.0
+    assert mappings[1].source_q_max_mvar == 30.0
+    assert mappings[1].ac_control_policy == "ODMS_REGULATING_ONLY"
